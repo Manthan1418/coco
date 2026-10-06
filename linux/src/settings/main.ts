@@ -353,6 +353,116 @@ function apiSection(hasKey: boolean): HTMLElement {
   );
 }
 
+// ── Profile section ─────────────────────────────────────────────────────────
+// Who you are, in your own words. Plain text, stored in settings.json (not a
+// secret), read into every turn's system prompt. The model also keeps its own
+// notes via memory_save/memory_recall — this is the part you write yourself.
+function profileSection(): HTMLElement {
+  const field = (
+    label: string, placeholder: string, get: () => string, set: (v: string) => void, wide = false,
+  ) => {
+    const input = h("input", {
+      type: "text",
+      value: get(),
+      placeholder,
+      style: wide ? "width:100%;max-width:340px" : "width:180px",
+      autocomplete: "off",
+      spellcheck: "false",
+    }) as HTMLInputElement;
+    input.addEventListener("change", () => {
+      set(input.value.trim());
+      void save();
+    });
+    return h("div", { class: "row" }, h("label", { text: label }), input);
+  };
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Profile" })),
+    field("Your name", "what should Coco call you", () => settings.userName ?? "", (v) => { settings.userName = v; }),
+    field("Music taste", "genres, moods, what fits coding", () => settings.musicTaste ?? "", (v) => { settings.musicTaste = v; }, true),
+    field("Setup notes", "workspace, routines, preferences", () => settings.setupNotes ?? "", (v) => { settings.setupNotes = v; }, true),
+    h("div", {
+      class: "hint",
+      text: "Coco also remembers things on its own mid-chat — ask it what it knows about you any time.",
+    }),
+  );
+}
+
+// ── Tool rules section ──────────────────────────────────────────────────────
+// Remembered approval answers: first match wins, unmatched tools always ask.
+// Written here by the human, never by the model — this list is policy, and
+// policy does not come from the thing being policed.
+function rulesSection(): HTMLElement {
+  const list = h("div", {});
+  const redraw = () => {
+    clear(list);
+    const rules = settings.toolRules ?? [];
+    if (rules.length === 0) {
+      list.append(h("div", { class: "hint", text: "No rules — every sensitive tool asks, every time." }));
+    }
+    rules.forEach((r, i) => {
+      const toolSel = h("select", { style: "width:130px" }) as HTMLSelectElement;
+      toolSel.append(
+        h("option", { value: "run_command", text: "run_command" }),
+        h("option", { value: "open_app", text: "open_app" }),
+      );
+      toolSel.value = r.tool === "open_app" ? "open_app" : "run_command";
+      toolSel.addEventListener("change", () => {
+        r.tool = toolSel.value;
+        void save();
+      });
+      const match = h("input", {
+        type: "text",
+        value: r.match,
+        placeholder: "match text, empty = whole tool",
+        style: "width:100%;max-width:220px",
+        autocomplete: "off",
+        spellcheck: "false",
+      }) as HTMLInputElement;
+      match.addEventListener("change", () => {
+        r.match = match.value;
+        void save();
+      });
+      const verdict = h("button", {
+        class: "switch" + (r.allow ? " on" : ""),
+        text: r.allow ? "allow" : "deny",
+        style: "width:auto;padding:2px 10px;border-radius:999px",
+      });
+      verdict.addEventListener("click", () => {
+        r.allow = !r.allow;
+        void save();
+        redraw();
+      });
+      const del = h("button", { class: "ghost-btn", title: "Delete rule", text: "×" });
+      del.addEventListener("click", () => {
+        rules.splice(i, 1);
+        void save();
+        redraw();
+      });
+      list.append(h("div", { class: "row" }, toolSel, match, verdict, del));
+    });
+  };
+  redraw();
+  const add = h("button", { text: "+ Remember an answer" });
+  add.addEventListener("click", () => {
+    (settings.toolRules ??= []).push({ tool: "run_command", match: "", allow: true });
+    void save();
+    redraw();
+  });
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Tool rules" })),
+    list,
+    h("div", { class: "row" }, add),
+    h("div", {
+      class: "hint",
+      text: "Substring on the command (run_command) or app name (open_app). First match wins; anything unmatched still asks.",
+    }),
+  );
+}
+
 // ── Integrations section ──────────────────────────────────────────────────────
 
 interface IntegrationDef {
@@ -569,6 +679,8 @@ async function main() {
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     apiSection(hasKey),
+    profileSection(),
+    rulesSection(),
     integrationsSection(present),
     generalSection(),
     h("div", {

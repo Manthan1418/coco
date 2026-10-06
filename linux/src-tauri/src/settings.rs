@@ -34,6 +34,34 @@ pub struct Settings {
     /// default rather than leaving Coco unsummonable.
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// Who the user is, in their own words. Free text, shown to the model.
+    #[serde(default)]
+    pub user_name: String,
+    /// Music taste, mood-to-genre and all. Free text, shown to the model.
+    #[serde(default)]
+    pub music_taste: String,
+    /// How they like their setup: workspace, routines, preferences that do
+    /// not fit anywhere else. Free text, shown to the model.
+    #[serde(default)]
+    pub setup_notes: String,
+    /// Remembered approval rules, first match wins: {tool, match, allow}.
+    /// `match` is a substring on the joined argv (run_command) or the app
+    /// name (open_app); empty matches the whole tool. Unmatched tools always
+    /// ask — nothing is silently allowed except the hardcoded read-only set.
+    #[serde(default)]
+    pub tool_rules: Vec<ToolRule>,
+}
+
+/// One remembered answer. Written from the settings screen, never by the
+/// model — the island asks the human, the human's answer can be remembered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRule {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub r#match: String,
+    #[serde(default)]
+    pub allow: bool,
 }
 
 fn default_hotkey() -> String {
@@ -68,6 +96,10 @@ impl Default for Settings {
             provider: default_provider(),
             endpoint: String::new(),
             hotkey: default_hotkey(),
+            user_name: String::new(),
+            music_taste: String::new(),
+            setup_notes: String::new(),
+            tool_rules: Vec::new(),
         }
     }
 }

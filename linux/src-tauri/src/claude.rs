@@ -39,7 +39,8 @@ const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at th
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
 Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
 No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.
-You have tools (notify, open_app, find_files, music, run_command): prefer using them over describing actions. run_command and open_app ask the user first — call them anyway when needed and wait for the result.";
+You have tools (notify, open_app, find_files, music, run_command): prefer using them over describing actions. run_command and open_app ask the user first — call them anyway when needed and wait for the result.
+You remember across conversations (memory_save/memory_recall) and you know the user's profile below, if any — use recall when the request touches preferences, setup, or music, and save new lasting facts without being asked.";
 
 #[derive(Default)]
 pub struct Chat {
@@ -306,12 +307,18 @@ pub(crate) fn openai_credentials(provider: &str, endpoint: &str) -> Result<(Stri
     Ok((url, key))
 }
 
-/// The message list for a chat-completions call: system prompt plus the stored
-/// history reduced to plain text. Tool-call history is deliberately NOT
-/// replayed — only final texts persist (see brain.rs) — so every turn starts
-/// from words, never from stale call ids.
-pub(crate) fn openai_base_messages(chat: &Chat) -> Vec<Value> {
-    let mut messages = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+/// The message list for a chat-completions call: system prompt (plus the
+/// user's profile, when any of it is filled in) plus the stored history
+/// reduced to plain text. Tool-call history is deliberately NOT replayed —
+/// only final texts persist (see brain.rs) — so every turn starts from words,
+/// never from stale call ids.
+pub(crate) fn openai_base_messages(chat: &Chat, profile: &str) -> Vec<Value> {
+    let mut system = SYSTEM_PROMPT.to_string();
+    if !profile.trim().is_empty() {
+        system.push_str("\nUser profile:\n");
+        system.push_str(profile);
+    }
+    let mut messages = vec![json!({ "role": "system", "content": system })];
     for past in chat.snapshot() {
         let role = past.get("role").and_then(Value::as_str).unwrap_or("user");
         let text = extract_text(past.get("content"));

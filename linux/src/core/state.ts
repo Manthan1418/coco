@@ -101,6 +101,14 @@ export interface Settings {
   endpoint: string;
   /** Global hotkey that summons the island, e.g. "Super+C". */
   hotkey: string;
+  /** Your name, in your own words — the model sees it. */
+  userName: string;
+  /** Music taste and moods — the model sees it. */
+  musicTaste: string;
+  /** Setup and preferences that fit nowhere else — the model sees it. */
+  setupNotes: string;
+  /** Remembered approval answers, first match wins. Written here, never by the model. */
+  toolRules: { tool: string; match: string; allow: boolean }[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -118,6 +126,10 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "claude-opus-5",
   endpoint: "",
   hotkey: "Super+C",
+  userName: "",
+  musicTaste: "",
+  setupNotes: "",
+  toolRules: [],
 };
 
 type Listener = () => void;

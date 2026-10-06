@@ -244,7 +244,7 @@ fn persist(shared: &State<'_, crate::Shared>, chat: &State<'_, Chat>) {
 /// Tools the model may use freely: read-only or trivially reversible. Anything
 /// else (open_app, run_command, anything unrecognized) goes to the approval
 /// card — the island's human-in-the-loop, same as the hook relay's.
-const AUTO_TOOLS: &[&str] = &["notify", "find_files", "music"];
+const AUTO_TOOLS: &[&str] = &["notify", "find_files", "music", "memory_save", "memory_recall"];
 const ASK_TOOLS: &[&str] = &["open_app", "run_command"];
 const MAX_ITERS: usize = 8;
 static LOCAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -292,7 +292,24 @@ async fn agent_turn(
     let first = chat.snapshot().is_empty();
     let user_text = C::openai_user_text(first, &context, &query);
     C::push_user(&chat, &user_text);
-    let mut messages = C::openai_base_messages(&chat);
+    let profile = {
+        let s = shared.settings.lock().unwrap();
+        let mut parts = Vec::new();
+        if !s.user_name.trim().is_empty() {
+            parts.push(format!("Name: {}", s.user_name.trim()));
+        }
+        if !s.music_taste.trim().is_empty() {
+            parts.push(format!("Music: {}", s.music_taste.trim()));
+        }
+        if !s.setup_notes.trim().is_empty() {
+            parts.push(format!("Setup: {}", s.setup_notes.trim()));
+        }
+        parts.join("\n")
+    };
+    // Remembered rules snapshot once per turn: edits mid-turn apply next
+    // turn, so a turn's policy can never shift under it.
+    let rules = shared.settings.lock().unwrap().tool_rules.clone();
+    let mut messages = C::openai_base_messages(&chat, &profile);
 
     // Hands, fetched live so the model is offered exactly what exists.
     // Failure degrades to tool-less chat, never to a failed turn.
@@ -337,7 +354,7 @@ async fn agent_turn(
                 v @ Value::Object(_) => v.clone(),
                 _ => json!({}),
             };
-            let result = run_one_tool(&app, &pending, &call.name, &args).await;
+            let result = run_one_tool(&app, &pending, &rules, &call.name, &args).await;
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -358,10 +375,46 @@ async fn agent_turn(
     Ok(ChatReply { text })
 }
 
+/// First matching remembered rule, if any. Matching is substring on the
+/// command line (run_command, sudo-prefixed when elevated) or the app name
+/// (open_app); an empty match covers the whole tool. Order is file order.
+fn rule_decision(
+    rules: &[crate::settings::ToolRule],
+    name: &str,
+    args: &Value,
+) -> Option<bool> {
+    for rule in rules {
+        if rule.tool != name {
+            continue;
+        }
+        if rule.r#match.trim().is_empty() {
+            return Some(rule.allow);
+        }
+        let haystack = match name {
+            "run_command" => {
+                let argv: Vec<String> = args
+                    .get("command")
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let sudo = args.get("sudo").and_then(Value::as_bool).unwrap_or(false);
+                format!("{}{}", if sudo { "sudo " } else { "" }, argv.join(" "))
+            }
+            "open_app" => args.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+            _ => continue,
+        };
+        if haystack.to_lowercase().contains(&rule.r#match.to_lowercase()) {
+            return Some(rule.allow);
+        }
+    }
+    None
+}
+
 /// One tool call through policy and, where required, the human.
 async fn run_one_tool(
     app: &AppHandle,
     pending: &State<'_, LocalPending>,
+    rules: &[crate::settings::ToolRule],
     name: &str,
     args: &Value,
 ) -> String {
@@ -371,7 +424,18 @@ async fn run_one_tool(
     if !ASK_TOOLS.contains(&name) {
         // Not offered, so the model invented it. Say so outright — a silent
         // drop would teach it that calls vanish.
-        return format!("unknown tool {name:?}: only notify, open_app, find_files, music and run_command exist.");
+        return format!("unknown tool {name:?}: only notify, open_app, find_files, music, run_command, memory_save and memory_recall exist.");
+    }
+    // Remembered rules, first match wins. Written by the human in settings,
+    // never by the model — this is the "don't ask me for ls again" list.
+    // Unmatched tools fall through to the card below.
+    if let Some(allow) = rule_decision(rules, name, args) {
+        if allow {
+            log::line(format!("tool rule allowed {name}"));
+            return mcp_text(name, args).await;
+        }
+        log::line(format!("tool rule denied {name}"));
+        return "Blocked by your remembered rules. Tell the user plainly and stop.".to_string();
     }
     if crate::integrations::PAUSED.load(Ordering::Relaxed) {
         // Paused means paused: no cards, no waits, no side effects. The turn
@@ -579,5 +643,41 @@ pub fn ensure_mcp() {
         crate::log::line(
             "coco-mcp not found — looked beside the app binary.".to_string(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rule_decision;
+    use crate::settings::ToolRule;
+    use serde_json::json;
+
+    fn rule(tool: &str, m: &str, allow: bool) -> ToolRule {
+        ToolRule { tool: tool.into(), r#match: m.into(), allow }
+    }
+
+    #[test]
+    fn rules_match_substring_first_wins_unmatched_asks() {
+        let rules = vec![
+            rule("run_command", "ls", true),
+            rule("run_command", "", false),
+            rule("open_app", "firefox", true),
+        ];
+        let ls = json!({"command": ["ls", "-la"]});
+        assert_eq!(rule_decision(&rules, "run_command", &ls), Some(true));
+        // Empty match covers the whole tool — but only after the ls rule.
+        let rm = json!({"command": ["rm", "-rf", "build"]});
+        assert_eq!(rule_decision(&rules, "run_command", &rm), Some(false));
+        assert_eq!(
+            rule_decision(&rules, "open_app", &json!({"name": "Firefox"})),
+            Some(true)
+        );
+        assert_eq!(
+            rule_decision(&rules, "open_app", &json!({"name": "spotify"})),
+            None
+        );
+        // Sudo prefixes the match haystack, so "sudo ls" still matches "ls".
+        let sudo = json!({"command": ["ls"], "sudo": true});
+        assert_eq!(rule_decision(&rules, "run_command", &sudo), Some(true));
     }
 }

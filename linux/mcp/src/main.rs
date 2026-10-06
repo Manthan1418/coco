@@ -532,8 +532,143 @@ fn tool_list() -> Value {
                 "sudo": {"type": "boolean", "description": "Elevate via the system password dialog", "default": false},
                 "timeout_secs": {"type": "integer", "default": 30}
             }, "required": ["command"]}
+        },
+        {
+            "name": "memory_save",
+            "description": "Remember a fact about the user for later (preferences, setup, tastes, routines). One fact per call, plain words. Recall it with memory_recall when relevant — especially setup and music preferences.",
+            "annotations": {"readOnlyHint": false},
+            "inputSchema": {"type": "object", "properties": {
+                "text": {"type": "string", "description": "The fact, e.g. 'prefers lo-fi while coding'"},
+                "tags": {"type": "string", "description": "Comma-separated tags, e.g. 'music,mood'"}
+            }, "required": ["text"]}
+        },
+        {
+            "name": "memory_recall",
+            "description": "Search remembered facts. Call it whenever the user's request touches preferences, setup, music, or anything they may have told you before.",
+            "annotations": {"readOnlyHint": true},
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Words to look for"},
+                "max_results": {"type": "integer", "default": 5}
+            }, "required": ["query"]}
         }
     ]})
+}
+
+fn memory_file() -> PathBuf {
+    let dir = home().join(".local/share/coco/memory");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("facts.jsonl")
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// One remembered fact. Append-only; exact-duplicate saves are ignored.
+/// Deletion is deliberately absent in v1 — the file is plain JSONL the user
+/// owns and can edit, and forgetting on command is a policy question, not a
+/// storage one.
+fn tool_memory_save(args: &Value) -> Value {
+    let text: String = match required(args, "text") {
+        Ok(t) => t,
+        Err(e) => return tool_error(e),
+    };
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return tool_error("nothing to remember".to_string());
+    }
+    if text.len() > 2000 {
+        return tool_error("too long — one fact per call, keep it short".to_string());
+    }
+    let tags: Vec<String> = arg::<String>(args, "tags")
+        .unwrap_or_default()
+        .unwrap_or_default()
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    // Exact duplicates teach nothing; skip silently (still "ok" — the fact
+    // is, after all, remembered).
+    if let Ok(existing) = std::fs::read_to_string(memory_file()) {
+        for line in existing.lines() {
+            if serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_string))
+                .as_deref()
+                == Some(text.as_str())
+            {
+                return ok_text("already remembered".to_string());
+            }
+        }
+    }
+    let entry = json!({"text": text, "tags": tags, "at": now_unix()});
+    let mut f = match std::fs::OpenOptions::new().create(true).append(true).open(memory_file()) {
+        Ok(f) => f,
+        Err(e) => return tool_error(format!("cannot write memory: {e}")),
+    };
+    use std::io::Write as _;
+    if writeln!(f, "{}", serde_json::to_string(&entry).unwrap()).is_err() {
+        return tool_error("cannot write memory".to_string());
+    }
+    ok_text("remembered".to_string())
+}
+
+fn tool_memory_recall(args: &Value) -> Value {
+    let query: String = match required(args, "query") {
+        Ok(q) => q,
+        Err(e) => return tool_error(e),
+    };
+    let max: usize = arg(args, "max_results").unwrap_or_default().unwrap_or(5).clamp(1, 20);
+    let Ok(content) = std::fs::read_to_string(memory_file()) else {
+        return ok_text("no memories yet".to_string());
+    };
+    // Score: tag hit beats text hit; newer beats older on ties. Substring
+    // matching, case-insensitive — keyword search is honest about what it is,
+    // and for a personal fact file it beats embeddings on debuggability.
+    let words: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(str::to_string)
+        .collect();
+    if words.is_empty() {
+        return ok_text("no memories yet".to_string());
+    }
+    let mut scored: Vec<(i64, u64, String)> = Vec::new();
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let text = v.get("text").and_then(Value::as_str).unwrap_or("");
+        if text.is_empty() {
+            continue;
+        }
+        let at = v.get("at").and_then(Value::as_u64).unwrap_or(0);
+        let tags: Vec<String> = v
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_lowercase)).collect())
+            .unwrap_or_default();
+        let tl = text.to_lowercase();
+        let mut score = 0i64;
+        for w in &words {
+            if tags.iter().any(|t| t.contains(w)) {
+                score += 3;
+            } else if tl.contains(w) {
+                score += 1;
+            }
+        }
+        if score > 0 {
+            scored.push((score, at, text.to_string()));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    scored.truncate(max);
+    if scored.is_empty() {
+        return ok_text("nothing remembered about that yet".to_string());
+    }
+    ok_text(scored.into_iter().map(|(_, _, t)| format!("- {t}")).collect::<Vec<_>>().join("\n"))
 }
 
 fn audit(tool: &str, args: &Value, outcome: &str) {
@@ -609,6 +744,8 @@ fn main() {
                     "find_files" => tool_find_files(&args),
                     "music" => tool_music(&args),
                     "run_command" => tool_run_command(&args),
+                    "memory_save" => tool_memory_save(&args),
+                    "memory_recall" => tool_memory_recall(&args),
                     _ => tool_error(format!("unknown tool {name:?}")),
                 };
                 let outcome = result
