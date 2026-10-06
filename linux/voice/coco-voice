@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Coco voice wake: "hey coco" opens the island, which says hello back.
+
+How it works, and why this shape:
+
+* One subprocess owns the mic (`parecord` streaming raw s16le/16k/mono from
+  the `coco-mic` PipeWire source). No PortAudio, no Pulse bindings — parecord
+  is already on the box and shares the device through the server, so there is
+  no fight with anything else recording.
+* Speech is gated twice before any inference: an RMS energy floor skips pure
+  silence, and faster-whisper's own VAD skips non-speech. Whisper `tiny.en`
+  only ever sees a 3 s window that already looks like someone talking, which
+  keeps an always-on listener near idle instead of burning a core.
+* The match is a transcript substring ("hey coco", plus the mishearings
+  whisper actually produces: koko/cocoa/cocu). No trained wake-word model, no
+  key, no cloud — and it works with any accent out of the box.
+* On match it execs `~/.local/bin/coco`. The running island's single-instance
+  hook does the summoning; a cold island just starts. Then it speaks the
+  greeting with Piper and goes back to listening.
+* While TTS plays (plus a short tail) inference is skipped entirely, so the
+  greeting can never wake itself — no echo loop, no barge-in bookkeeping.
+
+Layout: this file lives in linux/voice/ next to the hook relay's sources;
+~/.local/bin/coco-voice is a symlink back here, and Hyprland starts it at
+login after the ALSA sources exist.
+"""
+
+from __future__ import annotations
+
+import collections
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+
+RATE = 16_000
+CHANNELS = 1
+CHUNK_S = 1.0
+WINDOW_S = 3.0
+SAMPLES_PER_CHUNK = int(RATE * CHUNK_S)
+
+# Below this RMS the room is silent; skip inference entirely. Tuned for a
+# laptop mic at arm's length: quiet-room floor sits near 60-120, conversational
+# speech lands in the thousands.
+ENERGY_FLOOR = 300.0
+
+# What whisper hears when a human says "hey coco". Collected from real
+# tiny.en outputs, not guessed — add variants here when the log shows a miss.
+WAKE_PATTERNS = [
+    "hey coco",
+    "hey koko",
+    "hey cocoa",
+    "hey cocu",
+    "hey coca",
+    "a coco",
+    "hey gogo",
+]
+
+COOLDOWN_S = 10.0
+# Playback tail: the room rings briefly after TTS stops; keep skipping until
+# it settles so the greeting's tail never becomes a trigger.
+SETTLE_S = 0.8
+
+SOURCE = os.environ.get("COCO_MIC", "coco-mic")
+SINK = os.environ.get("COCO_SPEAKER", "coco-speakers")
+COCO_BIN = os.path.expanduser("~/.local/bin/coco")
+GREETING = "hey, how can i help you today"
+
+LOG = os.path.expanduser("~/.local/state/coco/voice.log")
+
+
+def log(msg: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+    try:
+        with open(LOG, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def rms(samples: bytes) -> float:
+    import numpy as np
+
+    if not samples:
+        return 0.0
+    pcm = np.frombuffer(samples, dtype=np.int16).astype(np.float32)
+    return float(np.sqrt(np.mean(pcm * pcm)))
+
+
+def transcribe(model, audio: bytes) -> str:
+    import numpy as np
+
+    pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+    # No vad_filter: faster-whisper 1.2.1 passes metadata_errors into a
+    # huggingface_hub open() that no longer takes it (TypeError on every
+    # call). The RMS energy gate above already keeps silence out, so the
+    # in-model VAD is redundant, not load-bearing.
+    segments, _ = model.transcribe(pcm, language="en")
+    return " ".join(s.text for s in segments).strip().lower()
+
+
+def matches_wake(text: str) -> str | None:
+    norm = re.sub(r"[^a-z ]+", "", text)
+    for pat in WAKE_PATTERNS:
+        if pat in norm:
+            return pat
+    return None
+
+
+def summon() -> None:
+    # The island summons itself via single-instance; we just knock.
+    subprocess.Popen(
+        [COCO_BIN],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def speak(tts, text: str) -> None:
+    import wave
+
+    out = "/tmp/coco-greet.wav"
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(tts.config.sample_rate)
+        for chunk in tts.synthesize(text):
+            w.writeframes(chunk.audio_int16_bytes)
+    subprocess.run(
+        ["pw-play", "--target", SINK, out],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def load_tts():
+    from piper import PiperVoice
+
+    voice_dir = os.path.expanduser("~/.local/share/coco/voices")
+    for root, _dirs, files in os.walk(voice_dir):
+        for f in files:
+            if f.endswith(".onnx"):
+                path = os.path.join(root, f)
+                log(f"tts voice {path}")
+                return PiperVoice.load(path)
+    raise FileNotFoundError(f"no .onnx voice under {voice_dir}")
+
+
+def shim_av_open() -> None:
+    # faster-whisper 1.2.1 (latest) passes metadata_errors= to av.open(), but
+    # PyAV removed that kwarg and this box runs av 19 on Python 3.14, for
+    # which no older av wheel exists to downgrade to. Strip it: current av
+    # ignores metadata errors by default, which is all the flag ever asked
+    # for. Without this every transcribe() dies with TypeError.
+    import av
+
+    orig = av.open
+
+    def open(*args, **kwargs):  # noqa: A002 - shadowing av.open on purpose
+        kwargs.pop("metadata_errors", None)
+        return orig(*args, **kwargs)
+
+    av.open = open  # type: ignore[method-assign]
+
+
+def main() -> int:
+    from faster_whisper import WhisperModel
+
+    shim_av_open()
+    log("coco-voice starting")
+    try:
+        model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+        log("whisper tiny.en loaded")
+    except Exception as e:  # noqa: BLE001
+        log(f"whisper load failed: {e}")
+        return 1
+    try:
+        tts = load_tts()
+    except Exception as e:  # noqa: BLE001
+        log(f"tts unavailable ({e}) — summoning without greeting")
+        tts = None
+
+    rec = subprocess.Popen(
+        [
+            "parecord",
+            f"--device={SOURCE}",
+            "--format=s16le",
+            f"--rate={RATE}",
+            f"--channels={CHANNELS}",
+            "--raw",
+            "/dev/stdout",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert rec.stdout is not None
+
+    window: collections.deque[bytes] = collections.deque(maxlen=int(WINDOW_S / CHUNK_S))
+    last_fire = 0.0
+    deaf_until = 0.0
+
+    log("listening")
+    while True:
+        raw = rec.stdout.read(SAMPLES_PER_CHUNK * 2)
+        if not raw:
+            log("mic stream ended — parecord died?")
+            return 2
+        if len(raw) < SAMPLES_PER_CHUNK * 2:
+            continue
+        now = time.monotonic()
+        if now < deaf_until:
+            window.clear()
+            continue
+        window.append(raw)
+        if len(window) < window.maxlen:
+            continue
+        if rms(b"".join(window)) < ENERGY_FLOOR:
+            continue
+        try:
+            text = transcribe(model, b"".join(window))
+        except Exception as e:  # noqa: BLE001
+            log(f"transcribe failed: {e}")
+            continue
+        if not text:
+            continue
+        hit = matches_wake(text)
+        if hit and now - last_fire >= COOLDOWN_S:
+            last_fire = now
+            log(f"wake ({hit}): {text!r}")
+            summon()
+            if tts is not None:
+                try:
+                    start = time.monotonic()
+                    speak(tts, GREETING)
+                    deaf_until = time.monotonic() + SETTLE_S
+                    log(f"greeted in {time.monotonic() - start:.1f}s")
+                except Exception as e:  # noqa: BLE001
+                    log(f"speak failed: {e}")
+            window.clear()
+        elif hit:
+            log(f"wake suppressed by cooldown: {text!r}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

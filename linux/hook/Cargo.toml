@@ -1,0 +1,13 @@
+[package]
+name = "coco-hook"
+description = "Relays Claude Code hook events to Coco over a unix socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coco-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"

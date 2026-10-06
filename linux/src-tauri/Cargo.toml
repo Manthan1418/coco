@@ -1,0 +1,45 @@
+[package]
+name = "coco"
+description = "Coco for Linux — the island at the top of your screen"
+authors = ["Coco"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "coco_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The OpenCode brain: status, approvals and the permission event feed.
+coco-engine = { path = "../engine" }
+# Stream combinators for driving the engine's SSE watch. The engine owns the
+# HTTP layer; this crate only consumes the stream it hands back.
+futures-util = "0.3"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Secrets: the freedesktop Secret Service (gnome-keyring / KWallet), the Linux
+# counterpart of the Windows Credential Manager. `crypto-rust` keeps the item
+# encryption off OpenSSL so nothing extra has to be on the user's box.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+# Local time for the log and the hook backup stamps (was GetLocalTime).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# The island window: _NET_WM_WINDOW_TYPE and the global cursor. tao has no
+# type-hint API, and under a tiling compositor a NORMAL window gets tiled
+# instead of sitting at the top-centre — verified in spike/island_spike.py.
+x11rb = { version = "0.13", features = ["shape"] }
+
+# Reading our own X11 window id out of the Tauri window, for the above.
+raw-window-handle = "0.6"

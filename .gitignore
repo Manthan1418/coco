@@ -1,0 +1,39 @@
+# Build artefacts
+NotchBuddy/build/
+NotchBuddy/NotchBuddy.xcodeproj/project.xcworkspace/xcuserdata/
+NotchBuddy/NotchBuddy.xcodeproj/xcuserdata/
+*.xcuserstate
+
+# Xcode DerivedData (outside repo — listed for clarity)
+DerivedData/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# iCloud stubs
+*.icloud
+
+# Local only (never published)
+.claude/
+_prive/
+
+# Rust build output (17GB — never commit; Cargo.lock stays tracked)
+target/
+
+# Node (node_modules 64MB, dist/ is rebuilt by prebuild)
+node_modules/
+dist/
+
+# Python (venvs 500MB+, caches)
+.venv*/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Logs and local runtime
+*.log
+.env
+.env.*
