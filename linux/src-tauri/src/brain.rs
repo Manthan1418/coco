@@ -225,6 +225,20 @@ fn cancelled() -> bool {
     CANCEL.swap(false, Ordering::Relaxed)
 }
 
+/// Sleep-poll twin of cancelled() for racing an in-flight HTTP call: dropping
+/// the request future aborts the connection for real, so cancel lands in
+/// ~100 ms even mid-download instead of at the next loop boundary (or the
+/// 90 s client timeout). Shares the flag with cancelled() — whichever arm
+/// fires first owns the abort, and both lead to the same unwind.
+async fn cancelled_async() {
+    loop {
+        if CANCEL.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// One chat turn, straight to the configured provider. The API key and any
 /// file bytes stay on the Rust side; the transcript persists locally.
 #[tauri::command]
@@ -275,17 +289,23 @@ async fn direct_anthropic(
 ) -> Result<ChatReply, String> {
     let (provider, model, endpoint) = (provider.to_string(), model.to_string(), endpoint.to_string());
     let host = provider.clone();
-    match crate::claude::send(chat, &provider, &model, &endpoint, query, context).await {
-        Ok(reply) => {
+    cancelled(); // stale clicks from a quiet island must not kill this turn
+    let reply = tokio::select! {
+        biased;
+        _ = cancelled_async() => {
+            crate::claude::pop_last(chat);
             persist(&shared, &chat);
-            log::line(format!("chat ok provider={provider} model={model} via={host}"));
-            Ok(reply)
+            log::line("chat cancelled by user".to_string());
+            return Err("Cancelled.".to_string());
         }
-        Err(err) => {
+        r = crate::claude::send(chat, &provider, &model, &endpoint, query, context) => r.map_err(|err| {
             log::line(format!("chat FAILED provider={provider} model={model} via={host}: {err}"));
-            Err(err)
-        }
-    }
+            err
+        })?,
+    };
+    persist(&shared, &chat);
+    log::line(format!("chat ok provider={provider} model={model} via={host}"));
+    Ok(reply)
 }
 
 /// Write the current wire history back to this conversation's file. Titles are
@@ -417,11 +437,13 @@ async fn agent_turn(
             progress(&app, "", &json!({}));
             return Err("Cancelled.".to_string());
         }
-        let reply = match C::post_chat_json(&url, provider, &key, model, &messages, tools.as_ref()).await {
-            Ok(r) => r,
-            Err(e) => {
+        let reply = match post_turn(&url, provider, &key, model, &messages, tools.as_ref()).await? {
+            Some(r) => r,
+            // Cancelled mid-download: the request is already dead, unwind.
+            None => {
+                abort(&chat);
                 progress(&app, "", &json!({}));
-                return Err(e);
+                return Err("Cancelled.".to_string());
             }
         };
         let text = C::reply_text(&reply);
@@ -470,11 +492,12 @@ async fn agent_turn(
         progress(&app, "", &json!({}));
         return Err("Cancelled.".to_string());
     }
-    let reply = match C::post_chat_json(&url, provider, &key, model, &messages, None).await {
-        Ok(r) => r,
-        Err(e) => {
+    let reply = match post_turn(&url, provider, &key, model, &messages, None).await? {
+        Some(r) => r,
+        None => {
+            abort(&chat);
             progress(&app, "", &json!({}));
-            return Err(e);
+            return Err("Cancelled.".to_string());
         }
     };
     let text = C::reply_text(&reply);
@@ -490,6 +513,24 @@ async fn agent_turn(
     Ok(ChatReply { text })
 }
 
+/// POST with a live cancel race. `Ok(None)` means the user cancelled: the
+/// request future was dropped mid-flight (aborting the connection), and the
+/// caller unwinds the same way as a boundary cancel.
+async fn post_turn(
+    url: &str,
+    provider: &str,
+    key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+) -> Result<Option<Value>, String> {
+    use crate::claude as C;
+    tokio::select! {
+        biased;
+        _ = cancelled_async() => Ok(None),
+        r = C::post_chat_json(url, provider, key, model, messages, tools) => r.map(Some),
+    }
+}
 /// First matching remembered rule, if any. Matching is substring on the
 /// command line (run_command, sudo-prefixed when elevated) or the app name
 /// (open_app); an empty match covers the whole tool. Order is file order.
