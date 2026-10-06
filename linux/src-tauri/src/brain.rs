@@ -437,7 +437,9 @@ async fn agent_turn(
             progress(&app, "", &json!({}));
             return Err("Cancelled.".to_string());
         }
-        let reply = match post_turn(&url, provider, &key, model, &messages, tools.as_ref()).await? {
+        let reply = match post_turn(&app, &url, provider, &key, model, &messages, tools.as_ref())
+            .await?
+        {
             Some(r) => r,
             // Cancelled mid-download: the request is already dead, unwind.
             None => {
@@ -492,7 +494,7 @@ async fn agent_turn(
         progress(&app, "", &json!({}));
         return Err("Cancelled.".to_string());
     }
-    let reply = match post_turn(&url, provider, &key, model, &messages, None).await? {
+    let reply = match post_turn(&app, &url, provider, &key, model, &messages, None).await? {
         Some(r) => r,
         None => {
             abort(&chat);
@@ -513,10 +515,15 @@ async fn agent_turn(
     Ok(ChatReply { text })
 }
 
-/// POST with a live cancel race. `Ok(None)` means the user cancelled: the
-/// request future was dropped mid-flight (aborting the connection), and the
+/// POST with a live cancel race, streamed. `Ok(None)` means the user cancelled:
+/// the request future was dropped mid-flight (aborting the connection), and the
 /// caller unwinds the same way as a boundary cancel.
+///
+/// Text deltas ride the `chat-delta` event as they arrive — throttled inside
+/// claude.rs — so the island grows the reply word by word instead of holding
+/// dots for the whole latency. Only the final assembled reply is returned here.
 async fn post_turn(
+    app: &AppHandle,
     url: &str,
     provider: &str,
     key: &str,
@@ -528,7 +535,12 @@ async fn post_turn(
     tokio::select! {
         biased;
         _ = cancelled_async() => Ok(None),
-        r = C::post_chat_json(url, provider, key, model, messages, tools) => r.map(Some),
+        r = C::post_chat_json_streaming(
+            url, provider, key, model, messages, tools,
+            |delta| {
+                let _ = app.emit("chat-delta", serde_json::json!({ "delta": delta }));
+            },
+        ) => r.map(Some),
     }
 }
 /// First matching remembered rule, if any. Matching is substring on the

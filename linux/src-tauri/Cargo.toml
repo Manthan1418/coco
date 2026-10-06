@@ -21,7 +21,9 @@ tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "process", "macros"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `stream` is what makes replies land word by word: Response::chunk() drives the
+# SSE reader in claude.rs. Everything else stays off — rustls only, no TLS store.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Secrets: the freedesktop Secret Service (gnome-keyring / KWallet), the Linux
 # counterpart of the Windows Credential Manager. `crypto-rust` keeps the item

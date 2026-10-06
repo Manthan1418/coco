@@ -39,6 +39,12 @@ function contextChip(label: string): HTMLElement {
 export function buildPrompt(onHeightChange: () => void): ViewHost {
   const chipRow = h("div", { class: "chip-row" });
   const log = h("div", { class: "chat-log" });
+  // The live reply: its own row, updated in place. The log rebuild in sync()
+  // is keyed on message count — re-rendering it per token would rebuild the
+  // whole transcript every few milliseconds.
+  const streamBubble = h("div", { class: "reply" });
+  const streamRow = h("div", { class: "chat-row" }, streamBubble);
+  streamRow.style.display = "none";
   const input = h("input", {
     type: "text",
     class: "chat-input",
@@ -104,6 +110,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory = [];
       State.chatGen++;
       State.chatSending = false;
+      State.chatProgress = null;
+      State.chatStream = "";
       State.stateOverride = null;
       void Bridge.chatReset();
       showHistory(false);
@@ -147,6 +155,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     State.chatGen++;
     State.chatSending = false;
     State.chatProgress = null;
+    State.chatStream = "";
     State.stateOverride = null;
     State.view = "prompt";
     showHistory(false);
@@ -168,6 +177,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   // unblock it when a conversation is opened mid-turn.
   void onEvent<{ tool: string; detail: string }>("tool-progress", ({ tool, detail }) => {
     if (!State.chatSending) return;
+    // A tool means this model call is over. Whatever it said before asking for
+    // the tool was preamble, not the answer — drop it, or the next stream would
+    // stack on stale words.
+    if (tool) State.chatStream = "";
     State.chatProgress = tool ? detail || tool : null;
     State.notify();
   });
@@ -176,6 +189,22 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   // reply that arrives afterwards is ignored instead of landing in the new
   // conversation.
   let activeGen = 0;
+  // True only while our own turn is streaming: a late delta from a cancelled
+  // or superseded turn is dropped instead of ghosting into the next answer.
+  let streamActive = false;
+  let streamFrame = 0;
+
+  // Words land faster than they can be drawn (and a notify redraws the island).
+  // Batch them into one render per frame — smooth to read, cheap to run.
+  void onEvent<{ delta: string }>("chat-delta", ({ delta }) => {
+    if (!streamActive || !delta || State.chatGen !== activeGen) return;
+    State.chatStream += delta;
+    if (streamFrame) return;
+    streamFrame = requestAnimationFrame(() => {
+      streamFrame = 0;
+      State.notify();
+    });
+  });
 
   async function submit() {
     const query = input.value.trim();
@@ -195,6 +224,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
     activeGen = State.chatGen;
+    State.chatStream = "";
+    streamActive = true;
     try {
       // Direct call: the reply comes back here, seconds later. The pin holds
       // the island open across LLM latency so the auto-collapse cannot drop
@@ -213,6 +244,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.view = "note";
       Sound.play("error");
     } finally {
+      streamActive = false;
+      State.chatStream = "";
       State.chatSending = false;
       State.isPinned = historyOpen || State.pendingApproval != null;
       State.notify();
@@ -245,18 +278,31 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       }
 
       const thinking = State.stateOverride === "thinking";
-      const count = State.chatHistory.length + (thinking ? 0.5 : 0);
+      const streaming = streamActive && State.chatStream.length > 0;
+      // Dots until the first words land, then the words themselves.
+      const waiting = thinking && !streaming;
+      const count = State.chatHistory.length + (waiting ? 0.5 : 0);
       const progress = thinking ? State.chatProgress : null;
       const key = `${count}:${progress ?? ""}`;
       if (key !== renderedKey) {
         renderedKey = key;
         clear(log);
         for (const m of State.chatHistory) log.append(bubble(m));
-        if (thinking) {
+        if (waiting) {
           if (progress) log.append(h("div", { class: "chat-row" }, h("div", { class: "prog", text: progress })));
           log.append(typingDots());
         }
         log.scrollTop = log.scrollHeight;
+      }
+
+      // The streaming row sits outside that rebuild and is updated in place:
+      // each delta costs one textContent, never a transcript rebuild.
+      if (streaming) {
+        streamBubble.textContent = State.chatStream;
+        if (!log.contains(streamRow)) log.append(streamRow);
+        log.scrollTop = log.scrollHeight;
+      } else if (log.contains(streamRow)) {
+        streamRow.remove();
       }
 
       const mode = State.chatSending ? "stop" : "send";

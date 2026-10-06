@@ -173,6 +173,12 @@ class AppState {
   /** What the turn is doing right now ("run pacman -S …"), if anything slow.
    * Cleared on every turn end. Display-only; never drives logic. */
   chatProgress: string | null = null;
+  /**
+   * Words streamed by the in-flight turn — grown token by token from the
+   * `chat-delta` events, rendered live, then replaced by the final reply when
+   * the turn lands. Cleared on every turn end.
+   */
+  chatStream = "";
 
   integrations: Record<string, IntegrationInfo> = {};
 

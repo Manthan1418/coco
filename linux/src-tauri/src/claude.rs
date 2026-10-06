@@ -393,6 +393,280 @@ pub(crate) async fn post_chat_json(
     serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
 }
 
+/// Streaming twin of `post_chat_json`: same request plus `stream: true`, and —
+/// in between — every text delta handed to `on_delta` as it lands, so the island
+/// grows the reply instead of showing dots for the whole latency.
+///
+/// The reply it returns is shaped exactly like `post_chat_json`'s (text and
+/// tool_calls reassembled from fragments), so `reply_text` / `parse_tool_calls`
+/// and every caller stay unchanged. Two providers-that-don't: a gateway that
+/// ignores `stream` answers with a plain JSON body (parsed whole, never reaches
+/// `on_delta`), and one that *rejects* it gets asked once more without — a
+/// streaming refusal degrades to a whole reply, never to a failed turn, and only
+/// before a word of it has been shown.
+pub(crate) async fn post_chat_json_streaming(
+    url: &str,
+    provider: &str,
+    key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+    mut on_delta: impl FnMut(&str),
+) -> Result<Value, String> {
+    let shown = std::sync::atomic::AtomicBool::new(false);
+    let mut batched = |delta: &str| {
+        shown.store(true, std::sync::atomic::Ordering::Relaxed);
+        on_delta(delta);
+    };
+    match stream_chat(url, provider, key, model, messages, tools, &mut batched).await {
+        Ok(reply) => Ok(reply),
+        Err(StreamFail::Status(msg))
+            if !shown.load(std::sync::atomic::Ordering::Relaxed) =>
+        {
+            crate::log::line(format!("streaming refused, retrying whole: {msg}"));
+            post_chat_json(url, provider, key, model, messages, tools).await
+        }
+        Err(fail) => Err(fail.into_message()),
+    }
+}
+/// Why a stream died: a refusal (HTTP status — the provider answered, and the
+/// answer was no) or a hard failure (network, body, provider error mid-stream).
+enum StreamFail {
+    Status(String),
+    Fatal(String),
+}
+
+impl StreamFail {
+    fn into_message(self) -> String {
+        match self {
+            StreamFail::Status(m) | StreamFail::Fatal(m) => m,
+        }
+    }
+}
+
+/// The stream itself. See `post_chat_json_streaming` for the contract.
+async fn stream_chat(
+    url: &str,
+    provider: &str,
+    key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+    mut on_delta: impl FnMut(&str),
+) -> Result<Value, StreamFail> {
+    let mut body = json!({ "model": model, "stream": true, "messages": messages });
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| StreamFail::Fatal(e.to_string()))?;
+
+    let mut req = client.post(url).header("content-type", "application/json");
+    if !key.is_empty() {
+        req = req.header("authorization", format!("Bearer {key}"));
+    }
+    if provider == "openrouter" {
+        req = req.header("X-Title", "Coco");
+    }
+    let mut response = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| StreamFail::Fatal(format!("Network error: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.map_err(|e| StreamFail::Fatal(e.to_string()))?;
+        return Err(StreamFail::Status(compat_error(provider, status, &text)));
+    }
+
+    // Dialect is decided by the first non-space byte: `{`/`[` means a whole
+    // JSON body (stream ignored), anything else an SSE event stream. Bytes all
+    // the way down — a chunk may split a multi-byte character, and only whole
+    // lines are ever converted.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut sse: Option<bool> = None;
+    let mut saw_done = false;
+    let mut asm = StreamAssembler::default();
+    // One emit per token would flood the webview (a notify is a full island
+    // render). Deltas batch here and land every 80 ms or 400 bytes — smooth
+    // enough to read, cheap enough not to stutter — plus one flush at the end.
+    let mut flush = String::new();
+    let mut last_flush = std::time::Instant::now();
+
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break, // stream over
+            Err(err) => {
+                // A dead connection mid-stream with words already shown still
+                // counts as failure: the caller must not persist half an answer.
+                return Err(StreamFail::Fatal(format!("Network error: {err}")));
+            }
+        };
+        pending.extend_from_slice(&chunk);
+
+        if sse.is_none() {
+            if let Some(&b) = pending.iter().find(|b| !b.is_ascii_whitespace()) {
+                sse = Some(!(b == b'{' || b == b'['));
+            } else {
+                continue; // still all whitespace
+            }
+        }
+
+        if sse == Some(false) {
+            continue; // JSON body: keep accumulating, parse after the loop
+        }
+
+        // SSE: whole lines only.
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches('\r');
+            let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
+                continue; // event:/id:/comments carry nothing we need
+            };
+            if payload == "[DONE]" {
+                saw_done = true;
+                break;
+            }
+            if let Some(delta) = asm.feed(payload) {
+                flush.push_str(&delta);
+            }
+            let now = std::time::Instant::now();
+            if now.duration_since(last_flush).as_millis() >= 80 || flush.len() >= 400 {
+                on_delta(&flush);
+                flush.clear();
+                last_flush = now;
+            }
+        }
+        // `[DONE]` means stop now, not when the server gets around to closing:
+        // some gateways hold the connection long after the answer is finished.
+        if saw_done {
+            break;
+        }
+    }
+
+    if !flush.is_empty() {
+        on_delta(&flush);
+    }
+    if let Some(err) = asm.error {
+        return Err(StreamFail::Fatal(err));
+    }
+    if sse == Some(false) {
+        // Stream ignored: the whole body is one ordinary chat-completion reply.
+        return serde_json::from_slice(&pending)
+            .map_err(|e| StreamFail::Fatal(format!("Bad API response: {e}")));
+    }
+    Ok(asm.into_reply())
+}
+
+/// Provider-facing error text for a failed compat call: the API's own message
+/// when the body is JSON (that is what makes a bad key obvious), otherwise the
+/// first whiff of whatever came back.
+fn compat_error(provider: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let detail = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| {
+                    e.get("message").and_then(Value::as_str).map(str::to_string).or_else(|| {
+                        // OpenAI nests message under error; be liberal.
+                        serde_json::to_string(e).ok()
+                    })
+                })
+                .or_else(|| v.get("message").and_then(Value::as_str).map(str::to_string))
+        })
+        .unwrap_or_else(|| body.chars().take(200).collect());
+    format!("{provider} API {status}: {detail}")
+}
+
+/// Reassembles one streamed reply. Text arrives as plain deltas; tool calls
+/// arrive as fragments keyed by index (id, then name, then argument bytes), and
+/// only mean something once the stream ends — hence `into_reply`.
+#[derive(Default)]
+struct StreamAssembler {
+    text: String,
+    /// index → (id, name, arguments so far)
+    tools: std::collections::BTreeMap<u64, (String, String, String)>,
+    finish: Option<String>,
+    error: Option<String>,
+}
+
+impl StreamAssembler {
+    /// One `data:` payload in, zero or one text delta out.
+    fn feed(&mut self, payload: &str) -> Option<String> {
+        let Ok(v) = serde_json::from_str::<Value>(payload) else {
+            return None; // pings, keep-alives, half-events
+        };
+        if let Some(err) = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
+            self.error = Some(err.to_string());
+            return None;
+        }
+        let choice = v.get("choices").and_then(Value::as_array).and_then(|c| c.first())?;
+        if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish = Some(fr.to_string());
+        }
+        let delta = choice
+            .get("delta")
+            .or_else(|| choice.get("message"))
+            .unwrap_or(&Value::Null);
+        let mut out = None;
+        if let Some(t) = delta.get("content").and_then(Value::as_str) {
+            if !t.is_empty() {
+                self.text.push_str(t);
+                out = Some(t.to_string());
+            }
+        }
+        if let Some(frags) = delta.get("tool_calls").and_then(Value::as_array) {
+            for f in frags {
+                let idx = f.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let slot = self.tools.entry(idx).or_default();
+                if let Some(id) = f.get("id").and_then(Value::as_str) {
+                    if !id.is_empty() {
+                        slot.0 = id.to_string();
+                    }
+                }
+                if let Some(func) = f.get("function") {
+                    if let Some(n) = func.get("name").and_then(Value::as_str) {
+                        slot.1.push_str(n);
+                    }
+                    if let Some(a) = func.get("arguments").and_then(Value::as_str) {
+                        slot.2.push_str(a);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn into_reply(self) -> Value {
+        let mut message = json!({ "role": "assistant", "content": self.text });
+        if !self.tools.is_empty() {
+            let calls: Vec<Value> = self
+                .tools
+                .iter()
+                .map(|(idx, (id, name, args))| {
+                    json!({
+                        "id": if id.is_empty() { format!("call_{idx}") } else { id.clone() },
+                        "type": "function",
+                        "function": { "name": name, "arguments": args },
+                    })
+                })
+                .collect();
+            message["tool_calls"] = Value::Array(calls);
+        }
+        let mut choice = json!({ "message": message });
+        if let Some(fr) = self.finish {
+            choice["finish_reason"] = Value::String(fr);
+        }
+        json!({ "choices": [choice] })
+    }
+}
+
 /// The reply's plain text (may be empty when the turn is all tool calls).
 pub(crate) fn reply_text(reply: &Value) -> String {
     reply
@@ -461,19 +735,7 @@ async fn post_compat(endpoint: &str, provider: &str, key: &str, body: &Value) ->
     let status = response.status();
     let text = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        let detail = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.get("error")
-                    .and_then(|e| {
-                        e.get("message").and_then(Value::as_str).map(str::to_string).or_else(|| {
-                            // OpenAI nests message under error; be liberal.
-                            serde_json::to_string(e).ok()
-                        })
-                    })
-            })
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        return Err(format!("{provider} API {status}: {detail}"));
+        return Err(compat_error(provider, status, &text));
     }
     Ok(text)
 }
@@ -534,7 +796,76 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, extract_text, normalize_endpoint, parse_tool_calls, reply_text};
+    use super::{
+        base64, extract_text, normalize_endpoint, parse_tool_calls, reply_text, StreamAssembler,
+    };
+
+    /// One gateway turn, fed as the wire delivers it: role first, then content
+    /// in pieces, then a finish.
+    #[test]
+    fn sse_assembler_reassembles_text_and_returns_each_delta() {
+        let mut asm = StreamAssembler::default();
+        let mut seen = String::new();
+        for payload in [
+            r#"{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{"content":"lo wo"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{"content":"rld"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        ] {
+            if let Some(delta) = asm.feed(payload) {
+                seen.push_str(&delta);
+            }
+        }
+        assert_eq!(seen, "Hello world");
+        let reply = asm.into_reply();
+        assert_eq!(reply_text(&reply), "Hello world");
+        assert_eq!(
+            reply["choices"][0]["finish_reason"].as_str(),
+            Some("stop")
+        );
+        assert!(parse_tool_calls(&reply).is_empty());
+    }
+
+    /// Tool calls arrive as fragments keyed by index: id once, name in pieces,
+    /// argument bytes spread over many chunks. Only the end state is a call.
+    #[test]
+    fn sse_assembler_stitches_fragmented_tool_calls() {
+        let mut asm = StreamAssembler::default();
+        for payload in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"run_","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"command","arguments":"{\"command\":[\"l"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"s\"]}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            asm.feed(payload);
+        }
+        let reply = asm.into_reply();
+        assert_eq!(reply_text(&reply), ""); // preamble-free tool turn
+        let calls = parse_tool_calls(&reply);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_9");
+        assert_eq!(calls[0].name, "run_command");
+        // Arguments come back stringified, exactly as the non-streaming API
+        // delivers them — brain.rs is what parses them into an object.
+        let args = match &calls[0].args {
+            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s).unwrap(),
+            other => other.clone(),
+        };
+        assert_eq!(args, serde_json::json!({"command": ["ls"]}));
+    }
+
+    /// A provider error mid-stream must surface, never come back as a
+    /// half-written "answer".
+    #[test]
+    fn sse_assembler_keeps_provider_errors() {
+        let mut asm = StreamAssembler::default();
+        asm.feed(r#"{"choices":[{"delta":{"content":"partial"}}]}"#);
+        assert_eq!(asm.feed(r#"{"error":{"message":"quota blown"}}"#), None);
+        // The public shape: into_reply is only reached when no error was seen
+        // (stream_chat returns it first) — here we just prove it was captured.
+        assert_eq!(asm.error.as_deref(), Some("quota blown"));
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -610,5 +941,30 @@ mod tests {
         // Empty or scheme-less input is an error, never a request to nowhere.
         assert!(normalize_endpoint("   ").is_err());
         assert!(normalize_endpoint("gw.example.com").is_err());
+    }
+
+    /// End-to-end proof against the real gateway: words must arrive *during*
+    /// the call, not only after it, and the reassembled reply must equal them.
+    /// Ignored by default so `cargo test` stays green without the daemon.
+    #[tokio::test]
+    #[ignore = "needs the local omniroute gateway on :20128"]
+    async fn live_stream_delivers_deltas_before_the_reply() {
+        let mut seen = String::new();
+        let reply = super::post_chat_json_streaming(
+            "http://localhost:20128/v1/chat/completions",
+            "custom",
+            "",
+            "auto/best-fast",
+            &[serde_json::json!({"role": "user", "content": "Reply with exactly: stream works"})],
+            None,
+            |delta| seen.push_str(delta),
+        )
+        .await
+        .expect("gateway answered");
+
+        let text = reply_text(&reply);
+        assert!(!text.is_empty(), "no reply text");
+        assert!(!seen.is_empty(), "nothing streamed — the whole reply arrived at once");
+        assert_eq!(seen.trim(), text, "streamed words differ from the final reply");
     }
 }

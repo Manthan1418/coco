@@ -155,6 +155,7 @@ export type BridgeEvent =
   | { name: "hook"; payload: Record<string, unknown> }
   | { name: "local-permission"; payload: { requestId: string; tool: string; command: string } }
   | { name: "tool-progress"; payload: { tool: string; detail: string } }
+  | { name: "chat-delta"; payload: { delta: string } }
   | { name: "screen-changed"; payload: null }
 ;
 
