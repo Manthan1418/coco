@@ -463,6 +463,24 @@ pub fn run() {
                 island::make_non_activating(&win);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
+                // The settings window already refuses to close; the island must
+                // too, and until now it did not. A close request from the
+                // compositor (a Super+Q over a focused island, a window rule,
+                // WM_DELETE from anywhere) destroyed the only visible window
+                // and left a process nobody could summon — the "ISLAND WINDOW
+                // LOST" entries in the log. Refuse it, and say so: whether this
+                // line ever appears is what tells us the trigger was a close
+                // request at all.
+                win.on_window_event(move |event| match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        log::line("island close request refused — the island hides, it does not die");
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        log::line("island window destroyed by GTK/compositor — not a close request");
+                    }
+                    _ => {}
+                });
             }
             gate.collapsed.store(false, Ordering::Relaxed);
             gate.set_active(true);

@@ -599,13 +599,11 @@ fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
 pub fn spawn_window_watch(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
-        let gone = match window(&app) {
-            None => true,
-            Some(_) => {
-                let state = x_map_state(&app);
-                state == "no xid (not X11)" || state == "X unavailable"
-            }
-        };
+        // WHY it counts as gone, not just that it does: "no window" means
+        // Tauri's registry lost the toplevel, the X strings mean our own X
+        // connection is blind to it. Same alarm, very different culprits.
+        let state = x_map_state(&app);
+        let gone = matches!(state.as_str(), "no window" | "no xid (not X11)" | "X unavailable");
         if gone {
             // Forensics, not just an alarm: the trigger is still unknown, so
             // capture which workspace was focused when it died. Shelling out
@@ -617,8 +615,8 @@ pub fn spawn_window_watch(app: AppHandle) {
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .unwrap_or_else(|| "unknown".to_string());
             crate::log::line(format!(
-                "ISLAND WINDOW LOST (focused workspace: {}) — the toplevel is gone \
-                 but the process lives on. If Super+C does nothing, restart Coco.",
+                "ISLAND WINDOW LOST (reason: {state}; focused workspace: {}) — the toplevel is \
+                 gone but the process lives on. If Super+C does nothing, restart Coco.",
                 workspace.trim(),
             ));
             // One line per loss, not one per 5 s: the state persists until a
