@@ -489,7 +489,7 @@ pub fn run() {
 
             log::line(format!("--- Coco {} started ---", env!("CARGO_PKG_VERSION")));
             hooks::ensure_hook_exe(&handle);
-            brain::ensure_mcp();
+            brain::ensure_mcp(&handle);
             brain::ensure_omnirouter();
             pipe::start(handle.clone());
             integrations::start(handle.clone());

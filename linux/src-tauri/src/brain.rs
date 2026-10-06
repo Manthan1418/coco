@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::claude::{Chat, ChatContext, ChatReply};
 use crate::log;
@@ -97,7 +97,31 @@ fn save_convo(convo: &StoredConvo) {
 /// omnirouter's port. The island's provider endpoint points here, so a silent
 /// dead gateway reads as "chat is broken" with no further explanation.
 const OMNI_PORT: u16 = 20128;
+/// Where the gateway usually sits when it was installed system-wide. Only a
+/// fallback: the binary is an external dependency (an npm global package), not
+/// something Coco ships, so it is looked up — see `omni_bin()`.
 const OMNI_BIN: &str = "/usr/bin/omniroute";
+
+/// The gateway binary to run. `COCO_OMNI_BIN` for anyone who installed it
+/// elsewhere (a version manager, a dev checkout), then the session PATH, then
+/// the system-wide default — looked up rather than assumed, because a wrong
+/// hard-coded path is indistinguishable from "chat is broken".
+fn omni_bin() -> std::path::PathBuf {
+    if let Ok(custom) = std::env::var("COCO_OMNI_BIN") {
+        if !custom.trim().is_empty() {
+            return std::path::PathBuf::from(custom);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("omniroute");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    std::path::PathBuf::from(OMNI_BIN)
+}
 
 /// True when OUR gateway answers: TCP open plus GET /v1/models → 200. The
 /// models check matters — an open port alone could be anything squatting
@@ -145,7 +169,16 @@ pub fn ensure_omnirouter() {
         };
         // --daemon forks and returns; --no-open/--no-tray keep a headless
         // boot free of surprise browser windows and tray icons.
-        let spawned = std::process::Command::new(OMNI_BIN)
+        let bin = omni_bin();
+        if !bin.exists() {
+            log::line(format!(
+                "omniroute not found at {} — the brain has no gateway. \
+                 Install it (npm i -g omniroute) or point COCO_OMNI_BIN at it.",
+                bin.display()
+            ));
+            return;
+        }
+        let spawned = std::process::Command::new(&bin)
             .args(["serve", "--daemon", "--no-open", "--no-tray"])
             .stdin(std::process::Stdio::null())
             .stdout(open_log())
@@ -892,7 +925,7 @@ pub fn chat_delete(chat: State<'_, Chat>, id: String) -> Result<bool, String> {
 /// It is NOT auto-registered anywhere: with no agent runtime consuming MCP,
 /// registration would point at nothing. External CLIs (e.g. terminal
 /// `claude`) can use the installed binary via their own MCP config.
-pub fn ensure_mcp() {
+pub fn ensure_mcp(app: &tauri::AppHandle) {
     use std::path::PathBuf;
 
     let dest = crate::settings::mcp_exe_path();
@@ -900,6 +933,13 @@ pub fn ensure_mcp() {
         let _ = std::fs::create_dir_all(dir);
     }
     let mut candidates: Vec<PathBuf> = vec![dest.clone()];
+    // The bundle's own resource dir: `dest` holds an installed copy, but a
+    // fresh install of a deb/appimage has one to copy *from*, and without
+    // this candidate a packaged Coco would log "coco-mcp not found" forever
+    // and chat without any hands at all.
+    if let Ok(p) = app.path().resolve("coco-mcp", tauri::path::BaseDirectory::Resource) {
+        candidates.push(p);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("coco-mcp"));
@@ -909,6 +949,7 @@ pub fn ensure_mcp() {
     }
     // A just-built binary is newer than an installed one; same-source
     // rebuilds are often byte-identical, so size alone cannot decide.
+    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
     if let Some(src) = candidates.iter().find(|p| p.exists()) {
         let fresh = match (std::fs::metadata(src), std::fs::metadata(&dest)) {
             (Ok(a), Ok(b)) => a.modified().ok() > b.modified().ok() || a.len() != b.len(),
@@ -927,9 +968,10 @@ pub fn ensure_mcp() {
             crate::log::line(format!("installed coco-mcp from {}", src.display()));
         }
     } else {
-        crate::log::line(
-            "coco-mcp not found — looked beside the app binary.".to_string(),
-        );
+        crate::log::line(format!(
+            "coco-mcp not found — no actions (run, search, web) until it is. Looked in: {}",
+            tried.join(", ")
+        ));
     }
 }
 
