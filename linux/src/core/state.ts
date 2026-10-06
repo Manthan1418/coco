@@ -170,6 +170,9 @@ class AppState {
   /** A brain turn is in flight. Lives here (not in the chat view) so opening
    * a conversation from the history list can unblock sending too. */
   chatSending = false;
+  /** What the turn is doing right now ("run pacman -S …"), if anything slow.
+   * Cleared on every turn end. Display-only; never drives logic. */
+  chatProgress: string | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
 

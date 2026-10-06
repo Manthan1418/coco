@@ -92,6 +92,8 @@ export const Bridge = {
    * file bytes never leave Rust. */
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
+  /** Stop the running turn. No turn running: harmless no-op. */
+  chatCancel: () => call<void>("chat_cancel"),
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
@@ -152,6 +154,7 @@ export type BridgeEvent =
   | { name: "tray"; payload: string }
   | { name: "hook"; payload: Record<string, unknown> }
   | { name: "local-permission"; payload: { requestId: string; tool: string; command: string } }
+  | { name: "tool-progress"; payload: { tool: string; detail: string } }
   | { name: "screen-changed"; payload: null }
 ;
 

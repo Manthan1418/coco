@@ -206,6 +206,25 @@ fn chrono_lite_date() -> String {
 
 // ── Chat ────────────────────────────────────────────────────────────────────
 
+/// Cancel flag for the in-flight turn, if any. Set by chat_cancel, read at
+/// every loop boundary (iteration top, before/after each tool). An LLM POST
+/// already in flight is the only thing that outruns it (client timeout
+/// bounds that at 90 s); everything else stops within a step.
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop the running turn, if any. The loop checks the flag at every boundary
+/// and unwinds itself (history stays consistent); the island's await then
+/// resolves like any other turn end. No turn running: harmless no-op.
+#[tauri::command]
+pub async fn chat_cancel() -> Result<(), String> {
+    CANCEL.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+fn cancelled() -> bool {
+    CANCEL.swap(false, Ordering::Relaxed)
+}
+
 /// One chat turn, straight to the configured provider. The API key and any
 /// file bytes stay on the Rust side; the transcript persists locally.
 #[tauri::command]
@@ -383,19 +402,41 @@ async fn agent_turn(
     // Per-turn argv memory, across all iterations: exact repeats return
     // cached answers (see run_one_tool) instead of re-running and re-asking.
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // A cancel from an earlier no-turn click must not kill this one.
+    cancelled();
+    // Shared abort: pop the unanswered question, persist the steady state,
+    // clear the progress line, report like any other turn end.
+    let abort = |chat: &State<'_, Chat>| {
+        C::pop_last(chat);
+        persist(&shared, chat);
+        log::line("chat cancelled by user".to_string());
+    };
     for _ in 0..MAX_ITERS {
-        let reply = C::post_chat_json(&url, provider, &key, model, &messages, tools.as_ref()).await?;
+        if cancelled() {
+            abort(&chat);
+            progress(&app, "", &json!({}));
+            return Err("Cancelled.".to_string());
+        }
+        let reply = match C::post_chat_json(&url, provider, &key, model, &messages, tools.as_ref()).await {
+            Ok(r) => r,
+            Err(e) => {
+                progress(&app, "", &json!({}));
+                return Err(e);
+            }
+        };
         let text = C::reply_text(&reply);
         let calls = C::parse_tool_calls(&reply);
         if calls.is_empty() {
             if text.is_empty() {
                 C::pop_last(&chat);
                 let detail = C::reply_error(&reply).unwrap_or_else(|| "No response text.".to_string());
+                progress(&app, "", &json!({}));
                 log::line(format!("chat FAILED provider={provider} model={model} via={host}: {detail}"));
                 return Err(detail);
             }
             C::push_assistant(&chat, &text);
             persist(&shared, &chat);
+            progress(&app, "", &json!({}));
             log::line(format!("chat ok provider={provider} model={model} via={host} (+tools)"));
             return Ok(ChatReply { text });
         }
@@ -424,14 +465,27 @@ async fn agent_turn(
         }
     }
     // Eight rounds of tools and still going: stop asking, take plain text.
-    let reply = C::post_chat_json(&url, provider, &key, model, &messages, None).await?;
+    if cancelled() {
+        abort(&chat);
+        progress(&app, "", &json!({}));
+        return Err("Cancelled.".to_string());
+    }
+    let reply = match C::post_chat_json(&url, provider, &key, model, &messages, None).await {
+        Ok(r) => r,
+        Err(e) => {
+            progress(&app, "", &json!({}));
+            return Err(e);
+        }
+    };
     let text = C::reply_text(&reply);
     if text.is_empty() {
         C::pop_last(&chat);
+        progress(&app, "", &json!({}));
         return Err("the turn ran long without answering.".to_string());
     }
     C::push_assistant(&chat, &text);
     persist(&shared, &chat);
+    progress(&app, "", &json!({}));
     log::line(format!("chat ok provider={provider} model={model} via={host} (+tools, capped)"));
     Ok(ChatReply { text })
 }
@@ -517,6 +571,7 @@ async fn run_one_tool(
     if let Some(allow) = rule_decision(rules, name, args) {
         if allow {
             log::line(format!("tool rule allowed {name}"));
+            progress(app, name, args);
             return mcp_text(name, args).await;
         }
         log::line(format!("tool rule denied {name}"));
@@ -561,6 +616,7 @@ async fn run_one_tool(
     match rx.await {
         Ok(true) => {
             log::line(format!("local permission {id} allowed ({name})"));
+            progress(app, name, args);
             let out = mcp_text(name, args).await;
             // Cache approved runs too, or the model re-asks and re-runs them.
             if name == "run_command" {
@@ -581,6 +637,15 @@ async fn run_one_tool(
             "The user denied this action. Say what happened and stop — do not try alternatives.".to_string()
         }
     }
+}
+
+/// Tell the island what the turn is doing right now, in words. Instant tools
+/// (notify, lookups) skip this — narration is for the slow ones, where the
+/// alternative is a minute of dots and a user reaching for a kill switch they
+/// don't have. Empty tool clears the line (turn end).
+fn progress(app: &AppHandle, tool: &str, args: &Value) {
+    let detail = if tool.is_empty() { String::new() } else { tool_target(tool, args) };
+    let _ = app.emit("tool-progress", serde_json::json!({ "tool": tool, "detail": detail }));
 }
 
 /// What the Allow button authorises, in the card's own words.

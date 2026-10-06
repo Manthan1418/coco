@@ -3,7 +3,7 @@
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
-import { Bridge, type ChatContext, type SessionCard, type ChatMsg } from "../core/bridge";
+import { Bridge, onEvent, type ChatContext, type SessionCard, type ChatMsg } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
@@ -46,8 +46,13 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     spellcheck: "false",
   }) as HTMLInputElement;
   const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
+  const stop = h("button", { class: "ghost-btn", title: "Stop this turn" }, svg(ICONS.xmark, 11));
+  stop.addEventListener("click", () => {
+    if (!State.chatSending) return;
+    void Bridge.chatCancel();
+  });
   const histBtn = h("button", { class: "ghost-btn", title: "Conversations" }, svg(ICONS.timer, 12));
-  const bar = h("div", { class: "chat-bar" }, input, histBtn, send);
+  const bar = h("div", { class: "chat-bar" }, input, histBtn, stop, send);
   const histPane = h("div", { class: "hist-list" });
   histPane.style.display = "none"; // See showHistory: author display:flex beats [hidden].
 
@@ -144,6 +149,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     }));
     State.chatGen++;
     State.chatSending = false;
+    State.chatProgress = null;
     State.stateOverride = null;
     State.view = "prompt";
     showHistory(false);
@@ -160,9 +166,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   );
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
-  let renderedCount = -1;
+  let renderedKey = "";
   // Sending state lives in State.chatSending so the history list can
   // unblock it when a conversation is opened mid-turn.
+  void onEvent<{ tool: string; detail: string }>("tool-progress", ({ tool, detail }) => {
+    if (!State.chatSending) return;
+    State.chatProgress = tool ? detail || tool : null;
+    State.notify();
+  });
+
   // The generation this submit belongs to. A reset bumps State.chatGen, and a
   // reply that arrives afterwards is ignored instead of landing in the new
   // conversation.
@@ -173,6 +185,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (!query || State.chatSending) return;
     input.value = "";
     State.chatSending = true;
+    State.chatProgress = null;
     Sound.play("send");
 
     State.chatHistory.push({ id: nextId++, role: "user", content: query });
@@ -194,9 +207,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       if (State.chatGen !== activeGen) return; // reset while awaiting: drop it
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
       State.stateOverride = null;
+      State.chatProgress = null;
       Sound.play("finish");
     } catch (err) {
       State.stateOverride = null;
+      State.chatProgress = null;
       State.noteMessage = String(err).replace(/^Error:\s*/, "");
       State.view = "note";
       Sound.play("error");
@@ -231,11 +246,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
       const thinking = State.stateOverride === "thinking";
       const count = State.chatHistory.length + (thinking ? 0.5 : 0);
-      if (count !== renderedCount) {
-        renderedCount = count;
+      const progress = thinking ? State.chatProgress : null;
+      const key = `${count}:${progress ?? ""}`;
+      if (key !== renderedKey) {
+        renderedKey = key;
         clear(log);
         for (const m of State.chatHistory) log.append(bubble(m));
-        if (thinking) log.append(typingDots());
+        if (thinking) {
+          if (progress) log.append(h("div", { class: "chat-row" }, h("div", { class: "prog", text: progress })));
+          log.append(typingDots());
+        }
         log.scrollTop = log.scrollHeight;
       }
 

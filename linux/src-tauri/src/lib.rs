@@ -438,6 +438,7 @@ pub fn run() {
             log_line,
             brain::chat_send,
             brain::chat_reset,
+            brain::chat_cancel,
             brain::local_decide,
             brain::chat_sessions,
             brain::chat_open,
