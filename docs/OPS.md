@@ -1,15 +1,22 @@
 # Coco operations — things that are true whether or not they seem reasonable
 
 ## Builds
-- Installable binaries come ONLY from `tauri build --no-bundle`. Plain
-  `cargo build` (any profile) bakes in `devUrl` and points the island at a
-  vite server that will not be there. cfg(dev) is feature-driven
-  (`!custom-protocol`), not profile-driven.
-- Release flow: `npm run build` (via prebuild) → `tauri build --no-bundle` →
-  copy `target/release/coco` AND `target/release/coco-mcp` to `~/.local/bin/` →
-  restart. The app self-installs both into `~/.local/share/coco/bin/` on boot.
-- Replacing `coco-mcp` while the service holds it spawned fails with
-  "Text file busy": POST `/disconnect`, copy, POST `/connect`.
+- Installable binaries come ONLY from `tauri build`. Plain `cargo build` (any
+  profile) bakes in `devUrl` and points the island at a vite server that will
+  not be there. cfg(dev) is feature-driven (`!custom-protocol`), not
+  profile-driven.
+- `npm run tauri build` runs `beforeBuildCommand` (`npm run build`, whose
+  `prebuild` builds `coco-hook` + `coco-mcp`, then tsc + vite) and bundles
+  **deb and appimage** into `target/release/bundle/`. `npm run pack` copies
+  them to `release/` as `Coco-Linux-<arch>[-<version>].deb|.AppImage`; the same
+  script still produces the Windows NSIS names, chosen by platform.
+- `coco-hook` and `coco-mcp` are bundle resources, and `ensure_*` copies them
+  into `~/.local/share/coco/bin/` on boot. If `coco-mcp` is missing the log
+  lists every path tried — the island then chats without hands instead of
+  failing, which is exactly why the line has to be findable.
+- Local dev install: copy `target/release/coco` **and** `target/release/coco-mcp`
+  to `~/.local/bin/` and restart. Copying over a running binary fails with
+  "Text file busy": write `coco.new`, then `mv` it into place.
 
 ## Hyprland rules (rules.lua, backed up as .bak-coco*)
 - Rules apply at window OPEN. Changing a rule needs a **Coco restart**, not
@@ -29,16 +36,37 @@
   map state tells the truth (`x=` in window-state lines).
 - The X stub `0x...001` (10×10 unmapped, class Coco) is NOT the island; probes
   must prefer the mapped window.
+- The island window had no `CloseRequested` guard — the settings window always
+  had one — so a close request from the compositor (a `Super+Q` over a focused
+  island, a window rule, `WM_DELETE`) destroyed the only visible window and
+  left a process nothing could summon. It now refuses, logs
+  `island close request refused`, and logs `Destroyed` separately, so the next
+  `ISLAND WINDOW LOST (reason: …)` distinguishes "Tauri's registry lost the
+  toplevel" (`no window`) from "our X connection is blind to it"
+  (`X unavailable`).
 
-## OpenCode service
-- PUT prompt body is `{text}`, not parts. PUT mcp body wraps `{"config": …}`.
-- Turn ends: `session.execution.succeeded/failed/interrupted` — `session.idle`
-  does NOT reliably fire.
-- Message list order is NOT chronological; pick max `time.created`.
-- MCP `failed` status is sticky: re-PUT does not retry, new sessions do not
-  retry — POST `/connect` (or DELETE + PUT) forces a fresh spawn.
-- The binary must exist BEFORE the first PUT for a scope, or the failure
-  caches and every later check misleads.
-- The service allows MCP tool calls by default (no opencode.json rules on
-  this machine): nothing asks unless policy says so. Approval cards (M1)
-  engage only under an asking policy — that is P5, not a bug in M1.
+## The brain — local omniroute gateway
+- The island's provider is `custom` → `http://localhost:20128/v1`: an
+  OpenAI-compatible **omniroute** gateway. Deliberately NOT the OpenCode
+  service — that wiring was removed; `pipe.rs` stays as the Claude Code relay
+  for external terminal sessions, with its own approval cards.
+- `ensure_omnirouter()` probes port 20128 **plus** `GET /v1/models` (an open
+  port could be anything squatting there) and spawns
+  `omniroute serve --daemon --no-open --no-tray` only when it is down; the
+  daemon supervises itself.
+- Binary lookup: `COCO_OMNI_BIN` → `PATH` → `/usr/bin/omniroute`. It is an
+  external npm package, never bundled; a miss logs the install command rather
+  than leaving chat mysteriously dead.
+- A turn is a tool loop over `coco-mcp` (`MAX_ITERS = 8`): read-only tools run
+  straight away, ask-first tools go through the approval card, every tool
+  failure degrades to words. Cancel aborts the in-flight request — the stream
+  too — instead of waiting it out.
+- Replies **stream**: `stream: true` SSE deltas ride the `chat-delta` event
+  (batched every 80 ms / 400 B) so the bubble grows word by word, and the
+  final reply is reassembled from the same fragments, leaving `reply_text`,
+  `parse_tool_calls` and every caller untouched. A gateway that ignores
+  `stream` answers whole; one that rejects it is retried whole — before a word
+  has been shown, never after.
+- Conversations are one JSON file per id under `~/.local/share/coco/chats/`.
+  The id **is** the filename, so anything containing a separator is refused
+  rather than sanitised.

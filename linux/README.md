@@ -1,155 +1,143 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128.png" width="96" alt="Coucou icon">
+<img src="src-tauri/icons/128x128.png" width="96" alt="Coco icon">
 
-# Coucou for Windows
+# Coco for Linux
 
-**Mochi doesn't get a notch on a PC — so it lives at the top of your screen instead.**
+**The island at the top of your screen** — a small companion that shows your
+coding-agent sessions, asks before it touches anything, and chats with a local
+brain. Tauri 2 + Rust + TypeScript, no framework, no telemetry, no account.
 
-Approve Claude Code permissions, watch your session work, drop a file, chat with Claude, keep an eye on your services — without leaving what you're doing.
-
-![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows)
+![Linux](https://img.shields.io/badge/Linux-Hyprland-0078D4?logo=linux)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=black)
 ![Rust](https://img.shields.io/badge/Rust-backend-000?logo=rust)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
-<img src="screenshots/greeting.png" width="640" alt="Mochi waving hello at launch">
-
 ---
+
+## What it does
+
+| | |
+|---|---|
+| **Island** | A 720×320 transparent XWayland window pinned at the top-centre of the screen, click-through until you need it. `Super+C` summons it, `Esc` sends it away. |
+| **Chat** | Streaming replies from a **local omniroute gateway** (OpenAI-compatible, `http://localhost:20128/v1`), with history on disk, rename/delete, cancel mid-reply. |
+| **Hands** | A local tool loop over `coco-mcp`: run commands, find and open files, launch apps, notify, play music, search the web, save and recall memory. |
+| **Approvals** | Destructive commands arrive as an approval card first. Read-only commands (list, show, find) run straight away; `sudo` goes through `pkexec`. |
+| **Voice** *(optional)* | "hey coco" opens the island and it greets you back — local whisper wake word + Piper TTS. |
+
+Everything happens on your machine: keys live in the Secret Service
+(gnome-keyring / KWallet), conversations in `~/.local/share/coco/`, and nothing
+phones home.
+
+## Requirements
+
+Coco leans on a few things already on a normal desktop box. Every one of them
+degrades to a smaller feature rather than a crash — but you get the real thing
+only if they are there.
+
+| | Needed for | Without it |
+|---|---|---|
+| [`omniroute`](https://www.npmjs.com/package/omniroute) — `npm i -g omniroute` | the brain | chat says "the brain has no gateway" |
+| `rg` (ripgrep), `curl` | file search, web fetch | those tools fail, chat explains |
+| `playerctl` | music control | music commands fail politely |
+| `notify-send` | desktop notifications | no notifications |
+| `pkexec` (polkit) | `sudo` commands | a sudo command fails with a message instead of prompting |
+| Secret Service (gnome-keyring / KWallet) | storing API keys | keys are not saved between runs |
+| `libayatana-appindicator` | the tray icon | island still works; GNOME also needs the AppIndicator extension |
+
+Voice additionally wants `parecord` + `pw-play` (PipeWire), `faster-whisper`
+and a [Piper](https://github.com/rhasspy/piper) voice — see [`voice/coco-voice`](voice/coco-voice).
 
 ## Install
 
-1. Download `Coucou-Windows-setup.exe` from the [latest release](../../releases/tag/windows-latest).
-2. Run it. It installs for the current user only — no admin prompt.
-3. Coucou starts, waves hello, and then gets out of the way.
+Grab `Coco-Linux-amd64.deb` or `Coco-Linux-amd64.AppImage` from `release/`
+(or build them below).
 
-### "Windows protected your PC"
+```bash
+sudo apt install ./Coco-Linux-amd64.deb     # Debian/Ubuntu
+# AppImage: chmod +x, then run it
+```
 
-The installer isn't code-signed yet, so **SmartScreen** shows a blue warning the first
-few times anybody downloads it:
+To start it with your session on Hyprland:
 
-> Windows protected your PC — Microsoft Defender SmartScreen prevented an unrecognised app from starting.
+```lua
+-- ~/.config/hypr/hyprland/execs.lua
+hl.exec_cmd("$HOME/.local/bin/coco")   -- or the installed path
+```
 
-Click **More info**, then **Run anyway**. That's it. Signing is on the list; until
-then this is what an unsigned installer looks like on Windows, and you can always
-[build it yourself](#build-it-yourself) if you'd rather not trust a download.
-
-## Using it
-
-<img src="screenshots/compact.png" width="292" alt="The compact island, with the integration pills as mini Mochis">
-<img src="screenshots/overview.png" width="640" alt="The overview: the focused integration on the left, the other pills on the right">
-<img src="screenshots/approval.png" width="640" alt="A Claude Code permission request, with Deny and Allow">
-<img src="screenshots/chat.png" width="640" alt="Chatting with Claude from the island">
-<img src="screenshots/drop.png" width="640" alt="Mochi turned into a box, waiting for a file">
-
-| What you do | What happens |
-|---|---|
-| Move the mouse to the very top-centre of the screen | Mochi peeks out |
-| Click the small island | It opens |
-| Click Mochi | It gets annoyed. Three times in a row and it goes dizzy |
-| Rest the pointer on Mochi for two seconds | Hearts |
-| Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
-| `Esc` | Closes the island |
-| Tray icon | Open, Settings…, Pause, Quit |
-
-Everything else happens on its own: a Claude Code permission request opens the
-island with **Deny / Allow**, a finished session shows what it did, and
-your integrations sit in the coloured pills next to Mochi.
-
-## Claude Code
-
-<img src="screenshots/settings.png" width="562" alt="The settings window">
-
-Open **Settings… → Claude Code → Install hooks…**. You get the exact diff of what
-will change in `%USERPROFILE%\.claude\settings.json`, the path of the dated backup
-that will be taken, and nothing is written until you click. Your own hooks are
-never touched, and uninstalling removes only Coucou's entries.
-
-The relay is a tiny executable, `coucou-hook.exe`, copied to
-`%LOCALAPPDATA%\Coucou\bin\` at launch. It is given 300 ms to reach Coucou and
-exits cleanly if the app is closed, slow or crashed — **a Claude Code session is
-never blocked or slowed down by Coucou.** If nobody answers a permission request
-in time, Coucou stays quiet and Claude Code asks in the terminal as usual.
-
-It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
-
-## Chat and keys
-
-**Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows
-Credential Manager**, never on disk and never in the interface — the island can
-only ask whether a key exists. Same for every integration key.
-
-No telemetry. The only network requests Coucou makes are to the services you
-configure yourself.
+(There is also an **Autostart** toggle in Settings; it defaults to off.)
 
 ## Build it yourself
 
-You need [Rust](https://rustup.rs), [Node 20+](https://nodejs.org), and the
-**MSVC build tools** (Visual Studio Build Tools with "Desktop development with
-C++"). WebView2 ships with Windows 10/11.
-
-```powershell
-cd windows
+```bash
 npm install
-npm run tauri dev      # live-reloading development build
-npm run pack           # builds the installer and drops it in windows/release/
+npm run pack          # tsc + vite, coco-hook + coco-mcp, the app, then deb + AppImage → release/
 ```
 
-`npm run dev` alone serves the front end in an ordinary browser, which is enough
-to work on the island's looks. It also serves `dev/upload-preview.html`, which
-replays the whole file-drop choreography on a loop — the one part of the UI that
-otherwise needs a real drag from Explorer to see. Neither page ships in the app.
+For day-to-day development:
 
-`npm run pack` leaves two files in `windows/release/`, the same names the release
-workflow publishes:
-
-```
-Coucou-Windows-X.Y.Z-setup.exe    the versioned installer
-Coucou-Windows-setup.exe          the same file under the rolling name
+```bash
+npm run tauri dev     # vite dev server, debug build, live reload
 ```
 
-Installing is optional — `target/release/coucou.exe` runs on its own. There is no
-window in the taskbar and no console: the island at the top of the screen and the
-Mochi in the notification area are the whole app, and Quit lives in its menu.
+Plain `cargo build` is **not** enough — it bakes the dev URL into the binary.
+Installable binaries come from `tauri build` (or, for a quick local install,
+copy `target/release/coco` **and** `target/release/coco-mcp` into
+`~/.local/bin/` and restart — the app self-installs both into
+`~/.local/share/coco/bin/` on boot).
 
-The 28 sounds are the macOS app's own files; they are never duplicated in this
-folder. The path is declared once, in `SOUNDS_DIR` at the top of
-`vite.config.ts` — when they move to `shared/sounds/`, change that one line.
+## Where things live
 
-The app icon and the tray icon are drawn in code, like Mochi itself:
+| Path | What |
+|---|---|
+| `~/.config/coco/settings.json` | settings: provider, model, endpoint, hotkey, screen, autostart |
+| `~/.local/share/coco/chats/` | one JSON file per conversation |
+| `~/.local/share/coco/memory/` | the assistant's memory, written by its memory tools |
+| `~/.local/share/coco/bin/` | `coco-hook`, `coco-mcp` — installed on first boot |
+| `~/.local/state/coco/coco.log` | the log — start here when something is wrong (rotates at 1 MB) |
+| `~/.local/share/coco/omniroute.log` | the gateway's own output |
 
-```powershell
-npm run icons          # regenerates src-tauri/icons from scripts/gen-icons.mjs
+## The brain
+
+Coco does not ship a model. It talks to a **local omniroute gateway** — an
+OpenAI-compatible endpoint on port `20128` — and starts it on boot if it is not
+already running (`omniroute serve --daemon`). The gateway in turn fronts
+whatever providers you configure in omniroute, so the island's Settings only
+need *endpoint + model* (defaults: `http://localhost:20128/v1`,
+`auto/best-fast`).
+
+- Binary found on `PATH`, then `/usr/bin/omniroute`; set **`COCO_OMNI_BIN`** to
+  point somewhere else.
+- Gateway down mid-session? The turn says so plainly and kicks a restart
+  instead of dying on a bare connection error.
+
+## Troubleshooting
+
+Start with `tail -f ~/.local/state/coco/coco.log`.
+
+| Log says | Means |
+|---|---|
+| `omniroute not found at …` | the gateway is not installed — `npm i -g omniroute`, or set `COCO_OMNI_BIN` |
+| `brain is starting — ask again in a few seconds` | the gateway is booting; retry in a moment |
+| `coco-mcp not found` | actions are disabled — rebuild (`cargo build --release -p coco-mcp`) and restart |
+| `ISLAND WINDOW LOST (reason: …)` | the toplevel vanished — the reason in the line says whether Tauri lost the window or our X connection went blind. Restart, and if it recurs the log is the bug report |
+| `island close request refused` | something asked the island to close (a `Super+Q` over a focused island, a window rule). It was ignored on purpose: the island hides, it does not die |
+| nothing, and no window | `hyprctl clients` should list `Coco`; if not, check `GDK_BACKEND … forced to "x11"` — the island needs XWayland (`DISPLAY`) for input shapes and click-through |
+
+## Repository layout
+
+```
+linux/
+├── src-tauri/     Rust: window, tray, hotkey, hooks relay, the brain (chat + tool loop)
+├── src/           TypeScript: island UI, chat, settings — no framework
+├── mcp/           coco-mcp — the hands (run, search, open, music, notify, web, memory)
+├── hook/          coco-hook — the Claude Code hooks relay
+├── voice/         "hey coco" wake word + TTS
+├── scripts/       icons + pack
+└── engine/        the legacy OpenCode client crate — not part of the app
 ```
 
-### Layout
-
-```
-windows/
-  src/                 island front end (TypeScript, no framework)
-    mochi/             Mochi and the launch greeting, in Canvas 2D
-    island/            state machine, hooks, integrations
-    views/             every island view
-    settings/          the settings window
-  src-tauri/           Rust backend: window, named pipe, Claude API, pollers
-  hook/                coucou-hook.exe, the Claude Code relay
-  scripts/             icon generator
-```
-
-### Log
-
-`%LOCALAPPDATA%\Coucou\coucou.log` — hook events, permission decisions, poller
-problems. It stays on your machine.
-
-## What's different from the Mac version
-
-- No notch, so the island lives at the top centre of the screen and retracts into
-  the top edge instead of hiding in a notch.
-- Permission approval works from **any** terminal; the Mac build only listens to
-  VS Code sessions.
-- Not in this version: sending a file by email, dragging Mochi onto a window to
-  attach it as context, and jumping to a specific terminal window — "Open
-  terminal" opens the working folder in VS Code when `code` is on your `PATH`.
-- Cal.com shows the next bookings as a list rather than the Mac's calendar.
+The macOS/Windows app is the rest of this repository; see the root
+[README](../README.md).

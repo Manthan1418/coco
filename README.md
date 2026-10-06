@@ -4,12 +4,13 @@
 
 # Coucou
 
-**A tiny friend that lives in your MacBook's notch — or at the top of your screen on Windows — and keeps an eye on your Claude Code sessions.**
+**A tiny friend that lives in your MacBook's notch — or at the top of your screen on Windows and Linux — and keeps an eye on your Claude Code sessions.**
 
 Approve permissions, watch your agents work, drop a file, chat with Claude — all without leaving what you're doing.
 
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-Hyprland%20%7C%20X11-FCC624?logo=linux&logoColor=black)
 ![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-native-0A84FF)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=black)
@@ -71,6 +72,20 @@ There is no notch on a PC, so the island slides out of the top edge of the scree
 instead of hiding inside one. See [`windows/README.md`](windows/README.md) for the
 rest of the differences.
 
+### Download for Linux
+
+1. Grab `Coco-Linux-amd64.deb` or `Coco-Linux-amd64.AppImage` from `release/`
+   (or build them below).
+2. `sudo apt install ./Coco-Linux-amd64.deb`, or `chmod +x` the AppImage and run it.
+3. Launch — the island pins itself to the top-centre of the screen. `Super+C`
+   summons it.
+
+The brain is a **local omniroute gateway** (`npm i -g omniroute`), not a cloud
+model: `omniroute serve --daemon` is started on first boot and the island talks
+to `http://localhost:20128/v1`. Everything — history, memory, keys (Secret
+Service) — stays on the machine. See [`linux/README.md`](linux/README.md) for
+the full dependency list, the voice stack ("hey coco") and troubleshooting.
+
 ### Build from source
 
 **macOS** — requirements: macOS 15+, Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen).
@@ -90,6 +105,15 @@ git clone https://github.com/Louis-CFM/coucou.git
 cd coucou/windows
 npm install
 npm run pack                # installer lands in windows/release/
+```
+
+**Linux** — requirements: [Rust](https://rustup.rs), Node 20+, `npm i -g omniroute`.
+
+```bash
+git clone https://github.com/Louis-CFM/coucou.git
+cd coucou/linux
+npm install
+npm run pack                # builds the app, deb + AppImage land in linux/release/
 ```
 
 ## Setup
@@ -133,6 +157,12 @@ The macOS app is native Swift 6 / SwiftUI / AppKit with **zero third-party depen
 - A [Tauri 2](https://tauri.app) app (Rust + TypeScript): the island is a transparent, always-on-top window that never steals focus, Mochi is drawn in Canvas 2D with the same shapes, timings and sounds as on the Mac.
 - Claude Code hooks go through a tiny `coucou-hook.exe` and a named pipe; keys live in Windows Credential Manager.
 - Details and differences in [`windows/README.md`](windows/README.md).
+
+**Linux**
+
+- Also [Tauri 2](https://tauri.app) (Rust + TypeScript), in [`linux/`](linux/) — the island is an XWayland window pinned to the top-centre of the screen, click-through until you need it.
+- Chat streams from a local omniroute gateway; a tool loop over `coco-mcp` runs commands, searches files, controls music and notifies, with approval cards before anything destructive.
+- Details, dependencies and troubleshooting in [`linux/README.md`](linux/README.md).
 
 ## Contributing
 
