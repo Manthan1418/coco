@@ -38,17 +38,35 @@ pub const DEFAULT_PROVIDER: &str = "anthropic";
 const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
 Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
+No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.
+You have tools (notify, open_app, find_files, music, run_command): prefer using them over describing actions. run_command and open_app ask the user first — call them anyway when needed and wait for the result.";
 
 #[derive(Default)]
 pub struct Chat {
     /// Full multi-turn history, including tool_use / tool_result blocks.
     messages: Mutex<Vec<Value>>,
+    /// Local conversation id backing this history (see brain.rs chats dir).
+    /// None until the first send after boot/reset.
+    convo: Mutex<Option<String>>,
 }
 
 impl Chat {
     pub fn reset(&self) {
         self.messages.lock().unwrap().clear();
+        *self.convo.lock().unwrap() = None;
+    }
+
+    pub(crate) fn convo(&self) -> Option<String> {
+        self.convo.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_convo(&self, id: &str) {
+        *self.convo.lock().unwrap() = Some(id.to_string());
+    }
+
+    pub(crate) fn restore(&self, messages: Vec<Value>, convo: &str) {
+        *self.messages.lock().unwrap() = messages;
+        *self.convo.lock().unwrap() = Some(convo.to_string());
     }
 
     fn is_empty(&self) -> bool {
@@ -63,7 +81,7 @@ impl Chat {
         self.messages.lock().unwrap().pop();
     }
 
-    fn snapshot(&self) -> Vec<Value> {
+    pub(crate) fn snapshot(&self) -> Vec<Value> {
         self.messages.lock().unwrap().clone()
     }
 }
@@ -81,26 +99,20 @@ pub struct ChatReply {
     pub text: String,
 }
 
-/// One chat turn. Returns the assistant's text, or a message the island shows
-/// in the note view. `provider` is `anthropic` | `openrouter` | `openai` |
-/// `custom`; `endpoint` is only read for `custom`.
+/// Direct chat for the native Anthropic provider only. The OpenAI-compatible
+/// providers (openrouter, openai, custom) run the tool loop in brain.rs
+/// instead — same endpoint, but with hands. Calling this for those providers
+/// is a wiring bug, hence the loud error rather than a silent fallback.
 pub async fn send(
     chat: &Chat,
     provider: &str,
     model: &str,
-    endpoint: &str,
+    _endpoint: &str,
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
     if provider == "openrouter" || provider == "openai" || provider == "custom" {
-        let url = if provider == "custom" {
-            normalize_endpoint(endpoint)?
-        } else if provider == "openai" {
-            OPENAI_ENDPOINT.to_string()
-        } else {
-            OPENROUTER_ENDPOINT.to_string()
-        };
-        return send_openai_compat(chat, provider, &url, model, query, context).await;
+        return Err("wiring bug: compat providers must run the brain tool loop".to_string());
     }
     send_anthropic(chat, model, query, context).await
 }
@@ -234,92 +246,6 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
 /// History is stored in Anthropic block form, so past turns are reduced to
 /// their text before sending — tool_use/result blocks become a placeholder
 /// rather than breaking the request. File context goes in as plain text.
-async fn send_openai_compat(
-    chat: &Chat,
-    provider: &str,
-    endpoint: &str,
-    model: &str,
-    query: String,
-    context: Option<ChatContext>,
-) -> Result<ChatReply, String> {
-    // A `custom` endpoint is usually a gateway running on this machine (an
-    // omniroute-style router on localhost), and those need no credential — so a
-    // missing key is not an error there. The hosted providers are pointless
-    // without theirs, so those still fail loudly instead of sending an
-    // unauthenticated request that comes back 401.
-    let key = match secrets::get(secrets::key_for_provider(provider)) {
-        Some(k) => k,
-        None if provider == "custom" => String::new(),
-        None => return Err("API key missing. Open settings.".to_string()),
-    };
-
-    let mut messages: Vec<Value> = Vec::new();
-    messages.push(json!({ "role": "system", "content": SYSTEM_PROMPT }));
-    for past in chat.snapshot() {
-        let role = past.get("role").and_then(Value::as_str).unwrap_or("user");
-        let text = extract_text(past.get("content"));
-        messages.push(json!({ "role": role, "content": text }));
-    }
-
-    // First-turn context only, mirroring the Anthropic path.
-    let mut user_text = String::new();
-    if chat.is_empty() {
-        match &context {
-            Some(ChatContext::File { name, path }) => {
-                let len = std::fs::metadata(path).ok().map(|m| m.len()).unwrap_or(u64::MAX);
-                if len <= MAX_INLINE_TEXT {
-                    if let Ok(text) = std::fs::read_to_string(path) {
-                        user_text.push_str(&format!("File {name} contents:\n{text}\n\n"));
-                    }
-                }
-            }
-            Some(ChatContext::Window { app_name, title, url }) => {
-                user_text.push_str(&format!("Context — App: {app_name}, Window: {title}"));
-                if let Some(url) = url {
-                    user_text.push_str(&format!(", URL: {url}"));
-                }
-                user_text.push_str("\n\n");
-            }
-            None => {}
-        }
-    }
-    user_text.push_str(&query);
-    messages.push(json!({ "role": "user", "content": user_text }));
-
-    chat.push(json!({ "role": "user", "content": [{ "type": "text", "text": user_text }] }));
-
-    let body = json!({ "model": model, "messages": messages });
-    let text = match post_compat(endpoint, provider, &key, &body).await {
-        Ok(t) => t,
-        Err(err) => {
-            chat.pop();
-            return Err(err);
-        }
-    };
-    let reply: Value = serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
-    let answer = reply
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if answer.is_empty() {
-        chat.pop();
-        // Surface the provider's own error shape when there is one.
-        let detail = reply
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("No response text.");
-        return Err(detail.to_string());
-    }
-    chat.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": answer }] }));
-    Ok(ChatReply { text: answer })
-}
 
 /// Turn whatever the user pasted into a chat-completions URL. A full URL ending
 /// in `chat/completions` is used as-is; a bare base URL gets the standard
@@ -360,6 +286,152 @@ fn extract_text(content: Option<&Value>) -> String {
         }
     }
     out.join("\n")
+}
+
+/// Credentials + URL for the OpenAI-compatible providers. `custom` gateways
+/// (usually localhost) need no key; hosted ones fail loudly without theirs.
+pub(crate) fn openai_credentials(provider: &str, endpoint: &str) -> Result<(String, String), String> {
+    let url = if provider == "custom" {
+        normalize_endpoint(endpoint)?
+    } else if provider == "openai" {
+        OPENAI_ENDPOINT.to_string()
+    } else {
+        OPENROUTER_ENDPOINT.to_string()
+    };
+    let key = match secrets::get(secrets::key_for_provider(provider)) {
+        Some(k) => k,
+        None if provider == "custom" => String::new(),
+        None => return Err("API key missing. Open settings.".to_string()),
+    };
+    Ok((url, key))
+}
+
+/// The message list for a chat-completions call: system prompt plus the stored
+/// history reduced to plain text. Tool-call history is deliberately NOT
+/// replayed — only final texts persist (see brain.rs) — so every turn starts
+/// from words, never from stale call ids.
+pub(crate) fn openai_base_messages(chat: &Chat) -> Vec<Value> {
+    let mut messages = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    for past in chat.snapshot() {
+        let role = past.get("role").and_then(Value::as_str).unwrap_or("user");
+        let text = extract_text(past.get("content"));
+        messages.push(json!({ "role": role, "content": text }));
+    }
+    messages
+}
+
+/// First-turn user text: file contents or window context, then the question.
+/// Later turns send the question bare — context was already banked.
+pub(crate) fn openai_user_text(first_turn: bool, context: &Option<ChatContext>, query: &str) -> String {
+    let mut user_text = String::new();
+    if first_turn {
+        match context {
+            Some(ChatContext::File { name, path }) => {
+                let len = std::fs::metadata(path).ok().map(|m| m.len()).unwrap_or(u64::MAX);
+                if len <= MAX_INLINE_TEXT {
+                    if let Ok(text) = std::fs::read_to_string(path) {
+                        user_text.push_str(&format!("File {name} contents:\n{text}\n\n"));
+                    }
+                }
+            }
+            Some(ChatContext::Window { app_name, title, url }) => {
+                user_text.push_str(&format!("Context — App: {app_name}, Window: {title}"));
+                if let Some(url) = url {
+                    user_text.push_str(&format!(", URL: {url}"));
+                }
+                user_text.push_str("\n\n");
+            }
+            None => {}
+        }
+    }
+    user_text.push_str(query);
+    user_text
+}
+
+pub(crate) fn push_user(chat: &Chat, text: &str) {
+    chat.push(json!({ "role": "user", "content": [{ "type": "text", "text": text }] }));
+}
+
+pub(crate) fn push_assistant(chat: &Chat, text: &str) {
+    chat.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": text }] }));
+}
+
+pub(crate) fn pop_last(chat: &Chat) {
+    chat.pop();
+}
+
+/// One tool call the model requested.
+pub(crate) struct CompatCall {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
+}
+
+/// Raw chat-completions POST: status-checked, JSON-parsed. The caller owns the
+/// body (tools or not) and the response (content, calls, or provider errors).
+pub(crate) async fn post_chat_json(
+    url: &str,
+    provider: &str,
+    key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&Value>,
+) -> Result<Value, String> {
+    let mut body = json!({ "model": model, "messages": messages });
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
+    let text = post_compat(url, provider, key, &body).await?;
+    serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
+}
+
+/// The reply's plain text (may be empty when the turn is all tool calls).
+pub(crate) fn reply_text(reply: &Value) -> String {
+    reply
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// The reply's tool calls, if any. Malformed entries are skipped, never fatal:
+// a model that fumbles the shape gets one more chance next iteration.
+pub(crate) fn parse_tool_calls(reply: &Value) -> Vec<CompatCall> {
+    let Some(calls) = reply
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .filter_map(|c| {
+            let f = c.get("function")?;
+            Some(CompatCall {
+                id: c.get("id").and_then(Value::as_str).unwrap_or("call_0").to_string(),
+                name: f.get("name").and_then(Value::as_str)?.to_string(),
+                args: f.get("arguments").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect()
+}
+
+/// The provider's own error message when the call failed but returned JSON.
+pub(crate) fn reply_error(reply: &Value) -> Option<String> {
+    reply
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 async fn post_compat(endpoint: &str, provider: &str, key: &str, body: &Value) -> Result<String, String> {
@@ -454,7 +526,7 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, extract_text, normalize_endpoint};
+    use super::{base64, extract_text, normalize_endpoint, parse_tool_calls, reply_text};
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -465,6 +537,39 @@ mod tests {
         assert_eq!(base64(b"foob"), "Zm9vYg==");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn tool_calls_parse_name_args_and_skip_garbage() {
+        // Shape observed live on auto/best-fast: arguments arrive stringified.
+        let reply = serde_json::json!({
+            "choices": [{"message": {
+                "content": "",
+                "tool_calls": [
+                    {"id": "a1", "type": "function",
+                     "function": {"name": "music", "arguments": "{\"action\":\"pause\"}"}},
+                    {"id": "a2", "type": "function",
+                     "function": {"name": "x"}},
+                    {"id": "a3", "type": "function", "function": {}},
+                ],
+            }}]
+        });
+        let calls = parse_tool_calls(&reply);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "a1");
+        assert_eq!(calls[0].name, "music");
+        assert_eq!(reply_text(&reply), "");
+        // Nameless entry dropped, nameless-function dropped with it.
+        assert!(calls.iter().all(|c| !c.name.is_empty()));
+    }
+
+    #[test]
+    fn plain_reply_has_text_and_no_calls() {
+        let reply = serde_json::json!({
+            "choices": [{"message": {"content": "  hi  "}}]
+        });
+        assert_eq!(reply_text(&reply), "hi");
+        assert!(parse_tool_calls(&reply).is_empty());
     }
 
     #[test]

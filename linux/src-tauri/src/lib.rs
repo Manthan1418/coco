@@ -7,6 +7,7 @@ mod hooks;
 mod integrations;
 mod island;
 pub mod log;
+mod mcp_call;
 mod pipe;
 mod secrets;
 mod settings;
@@ -23,7 +24,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
-use brain::Brain;
 use claude::Chat;
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
@@ -418,7 +418,7 @@ pub fn run() {
         })
         .manage(Pending::default())
         .manage(Chat::default())
-        .manage(Brain::default())
+        .manage(brain::LocalPending::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -435,14 +435,12 @@ pub fn run() {
             approval_decision,
             approval_ack,
             approval_decline,
-            brain::opencode_status,
-            brain::opencode_permissions,
-            brain::opencode_reply,
             log_line,
             brain::chat_send,
             brain::chat_reset,
-            brain::opencode_sessions,
-            brain::opencode_open,
+            brain::local_decide,
+            brain::chat_sessions,
+            brain::chat_open,
             ingest_file,
             secret_present,
             secret_set,
@@ -471,11 +469,8 @@ pub fn run() {
             log::line(format!("--- Coco {} started ---", env!("CARGO_PKG_VERSION")));
             hooks::ensure_hook_exe(&handle);
             brain::ensure_mcp();
+            brain::ensure_omnirouter();
             pipe::start(handle.clone());
-            brain::spawn_permission_watch(handle.clone());
-            tauri::async_runtime::spawn(async move {
-                brain::register_mcp().await;
-            });
             integrations::start(handle.clone());
             hotkey::register(&handle, &loaded.hotkey);
             Ok(())

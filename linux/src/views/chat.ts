@@ -3,7 +3,7 @@
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
-import { Bridge, onEvent, type ChatContext, type OpencodeTurn, type SessionCard, type ChatMsg } from "../core/bridge";
+import { Bridge, type ChatContext, type SessionCard, type ChatMsg } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
@@ -85,13 +85,31 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     histPane.append(h("div", { class: "hist-empty", text: "Loading…" }));
     let sessions: SessionCard[];
     try {
-      sessions = await Bridge.opencodeSessions();
+      sessions = await Bridge.chatSessions();
     } catch (err) {
       clear(histPane);
       histPane.append(h("div", { class: "hist-empty", text: `Couldn't list conversations: ${String(err).replace(/^Error:\s*/, "")}` }));
       return;
     }
     clear(histPane);
+    const fresh = h(
+      "button",
+      { class: "hist-row hist-new", title: "Start a new conversation" },
+      h("span", { class: "hist-title", text: "+ New conversation" }),
+      h("span", { class: "hist-time", text: "" }),
+    );
+    fresh.addEventListener("click", () => {
+      State.chatHistory = [];
+      State.chatGen++;
+      State.chatSending = false;
+      State.stateOverride = null;
+      void Bridge.chatReset();
+      showHistory(false);
+      State.notify();
+      onHeightChange();
+      input.focus();
+    });
+    histPane.append(fresh);
     if (sessions.length === 0) {
       histPane.append(h("div", { class: "hist-empty", text: "No conversations yet." }));
       return;
@@ -111,12 +129,14 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   async function openConversation(id: string) {
     let msgs: ChatMsg[];
     try {
-      msgs = await Bridge.opencodeOpen(id);
+      msgs = await Bridge.chatOpen(id);
     } catch (err) {
       clear(histPane);
       histPane.append(h("div", { class: "hist-empty", text: `Couldn't open it: ${String(err).replace(/^Error:\s*/, "")}` }));
       return;
     }
+    // Full transcript, prompts included: the walker reads every wire shape
+    // (flat user text included), so questions and answers stay together.
     State.chatHistory = msgs.map((m) => ({
       id: nextId++,
       role: m.role === "user" ? ("user" as const) : ("assistant" as const),
@@ -144,37 +164,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   // Sending state lives in State.chatSending so the history list can
   // unblock it when a conversation is opened mid-turn.
   // The generation this submit belongs to. A reset bumps State.chatGen, and a
-  // turn that finishes afterwards is ignored — see the opencode-turn handler.
+  // reply that arrives afterwards is ignored instead of landing in the new
+  // conversation.
   let activeGen = 0;
-
-  // The brain answers asynchronously: chatSend only enqueues, and the turn
-  // lands here when the agent goes idle. Registered once per chat view.
-  void onEvent<OpencodeTurn>("opencode-turn", (turn) => {
-    if (!State.chatSending) return;
-    State.chatSending = false;
-    // The turn held the pin (see submit); hand it back unless something else
-    // — history browsing, an approval card — still needs it.
-    State.isPinned = historyOpen || State.pendingApproval != null;
-    // A reset (file drop) starts a new conversation: unblock either way, but
-    // only land the answer when it belongs to the current one.
-    if (State.chatGen !== activeGen) {
-      State.isPinned = historyOpen || State.pendingApproval != null;
-      State.notify();
-      return;
-    }
-    State.stateOverride = null;
-    if (turn.text) {
-      State.chatHistory.push({ id: nextId++, role: "assistant", content: turn.text });
-      Sound.play("finish");
-    } else {
-      State.noteMessage = (turn.error ?? "The turn failed.").replace(/^Error:\s*/, "");
-      State.view = "note";
-      Sound.play("error");
-    }
-    State.notify();
-    onHeightChange();
-    input.focus();
-  });
 
   async function submit() {
     const query = input.value.trim();
@@ -192,25 +184,25 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     const context: ChatContext | null =
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
+    activeGen = State.chatGen;
     try {
-      // Enqueue only: the answer arrives as an `opencode-turn` event when the
-      // agent goes idle (after tools and any permission cards). chatSending
-      // stays true until then, and a second submit is refused below.
-      await Bridge.chatSend(query, context);
-      activeGen = State.chatGen;
-      // A turn takes seconds to minutes (tools, cards). Without the pin the
-      // auto-collapse fires mid-answer, the shape shrinks to the strip, and
-      // the reply lands in an island the user can no longer touch.
+      // Direct call: the reply comes back here, seconds later. The pin holds
+      // the island open across LLM latency so the auto-collapse cannot drop
+      // the input shape mid-answer (same reason the approval card pins).
       State.isPinned = true;
+      const reply = await Bridge.chatSend(query, context);
+      if (State.chatGen !== activeGen) return; // reset while awaiting: drop it
+      State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+      State.stateOverride = null;
+      Sound.play("finish");
     } catch (err) {
       State.stateOverride = null;
       State.noteMessage = String(err).replace(/^Error:\s*/, "");
       State.view = "note";
       Sound.play("error");
-      State.chatSending = false;
     } finally {
-      // NOTE: chatSending stays true on success — only the opencode-turn handler
-      // or the catch above clears it. Clearing here would drop the answer.
+      State.chatSending = false;
+      State.isPinned = historyOpen || State.pendingApproval != null;
       State.notify();
       onHeightChange();
       input.focus();

@@ -523,21 +523,7 @@ pub fn transcript_texts(transcript: &Value) -> Vec<(f64, String, String)> {
             Some("assistant") => "assistant",
             _ => continue,
         };
-        let mut text = String::new();
-        for part in m.get("content").and_then(Value::as_array).into_iter().flatten() {
-            if part.get("type").and_then(Value::as_str) != Some("text") {
-                continue;
-            }
-            if let Some(t) = part.get("text").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(t);
-            }
-        }
-        if text.is_empty() {
-            continue;
-        }
+        let Some(text) = message_text(m) else { continue };
         let created = m
             .get("time")
             .and_then(|t| t.get("created"))
@@ -547,6 +533,43 @@ pub fn transcript_texts(transcript: &Value) -> Vec<(f64, String, String)> {
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(a.1.cmp(&b.1)));
     out.into_iter().map(|(c, _, r, t)| (c, r, t)).collect()
+}
+
+/// A message's human text, whatever shape the server stored it in. Observed
+/// live on 2.0.22, all three in the wild:
+/// - assistant: `content: [{type: "text", text}]` (tool/reasoning parts skipped)
+/// - user (stored): flat `text` — NO content array at all. A walker that only
+///   reads content[] silently drops every user message, and the history shows
+///   answers with no questions. Measured, then fixed.
+/// - user (prompt echo): `payload: {text}`.
+fn message_text(m: &Value) -> Option<String> {
+    let mut text = String::new();
+    for part in m.get("content").and_then(Value::as_array).into_iter().flatten() {
+        if part.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(t) = part.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(t);
+        }
+    }
+    if !text.is_empty() {
+        return Some(text);
+    }
+    // Flat or payload shapes (user messages on this server).
+    m.get("text")
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            m.get("payload")
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+                .filter(|t| !t.trim().is_empty())
+                .map(str::to_string)
+        })
 }
 /// The chat turn's answer: concatenated `text` parts of the LATEST assistant
 /// message. Tool calls, reasoning and compaction entries are not chat — the
@@ -864,6 +887,26 @@ mod tests {
         let ev = server_event_from_payload(hello).expect("hello must parse");
         assert_eq!(ev.event_type, "server.connected");
         assert!(ev.session_id.is_none());
+    }
+
+    #[test]
+    fn transcript_texts_reads_all_three_wire_shapes() {
+        // The flat user shape is the live one (fetched from a real session):
+        // {"type":"user","time":{"created":…},"text":"…"} — no content array.
+        let transcript = serde_json::json!({
+            "data": [
+                {"type": "assistant", "time": {"created": 200.0}, "content": [{"type": "text", "text": "second"}]},
+                {"type": "user", "time": {"created": 100.0}, "text": "what are you doing"},
+                {"type": "user", "time": {"created": 50.0}, "payload": {"text": "echo-shaped"}},
+                {"type": "system", "time": {"created": 10.0}, "content": [{"type": "text", "text": "skipped"}]},
+            ]
+        });
+        let got = transcript_texts(&transcript);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].1, "user");
+        assert_eq!(got[0].2, "echo-shaped");
+        assert_eq!(got[1].2, "what are you doing");
+        assert_eq!(got[2], (200.0, "assistant".to_string(), "second".to_string()));
     }
 
     #[test]

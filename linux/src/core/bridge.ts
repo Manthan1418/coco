@@ -77,34 +77,21 @@ export const Bridge = {
   approvalAck: (requestId: string) => call<void>("approval_ack", { requestId }),
   /** "Nobody can act on this" — Claude Code asks in the terminal right away. */
   approvalDecline: (requestId: string) => call<void>("approval_decline", { requestId }),
+  /** Answer the island's own tool card: run it, or tell the turn it was denied. */
+  localDecide: (requestId: string, allow: boolean) =>
+    call<void>("local_decide", { requestId, allow }),
 
-  // ── OpenCode brain ────────────────────────────────────────────────────
-  /** Reachability, never an error: offline is a state, not a failure. */
-  opencodeStatus: () => call<OpencodeStatus>("opencode_status"),
-  /** What the service is waiting on. Empty, not an error, when idle. */
-  opencodePermissions: (directory?: string | null) =>
-    callOrThrow<OpencodePermission[]>("opencode_permissions", { directory: directory ?? null }),
-  /**
-   * Answer an approval card. allow = once, deny = reject; always exists for
-   * the day remembered-rules land. Surfacing: a request that is already gone
-   * (answered in the TUI) rejects here, and the card just clears.
-   */
-  opencodeReply: (sessionId: string, requestId: string, decision: "allow" | "always" | "deny") =>
-    callOrThrow<void>("opencode_reply", { sessionId, requestId, decision }),
-  /** Every conversation on the service, newest first. Empty when fresh. */
-  opencodeSessions: () => callOrThrow<SessionCard[]>("opencode_sessions"),
-  /** Resume one: points the brain at it and returns its transcript. */
-  opencodeOpen: (sessionId: string) =>
-    callOrThrow<ChatMsg[]>("opencode_open", { sessionId }),
+  // ── Local conversations ─────────────────────────────────────────────
+  /** Every local conversation, newest first. Empty when fresh. */
+  chatSessions: () => callOrThrow<SessionCard[]>("chat_sessions"),
+  /** Resume one: restores its history and returns its transcript. */
+  chatOpen: (id: string) => callOrThrow<ChatMsg[]>("chat_open", { id }),
 
   // ── Chat, files, secrets ──────────────────────────────────────────────────
-  /**
-   * One chat turn through the OpenCode brain. Returns as soon as the prompt is
-   * accepted — the answer arrives later as an `opencode-turn` event, because
-   * the turn may run tools and permission cards first.
-   */
+  /** One chat turn, straight to the configured provider. The API key and any
+   * file bytes never leave Rust. */
   chatSend: (query: string, context: ChatContext | null) =>
-    callOrThrow<void>("chat_send", { query, context }),
+    callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
@@ -164,33 +151,9 @@ export type BridgeEvent =
   | { name: "cursor"; payload: { x: number; y: number } }
   | { name: "tray"; payload: string }
   | { name: "hook"; payload: Record<string, unknown> }
+  | { name: "local-permission"; payload: { requestId: string; tool: string; command: string } }
   | { name: "screen-changed"; payload: null }
-  | { name: "opencode-permission"; payload: OpencodePermission }
-  | { name: "opencode-replied"; payload: { sessionId: string; requestId: string } }
-  | { name: "opencode-pending"; payload: OpencodePermission[] }
-  | { name: "opencode-status"; payload: OpencodeStatus }
-  | { name: "opencode-turn"; payload: OpencodeTurn };
-
-export interface OpencodeStatus {
-  reachable: boolean;
-  version: string | null;
-  pid: number | null;
-  source: string | null;
-}
-
-export interface OpencodePermission {
-  id: string;
-  sessionId: string;
-  action: string;
-  resources: string[];
-  message: string | null;
-}
-
-/** A finished brain turn: either text to show, or an error for the note view. */
-export interface OpencodeTurn {
-  text: string | null;
-  error: string | null;
-}
+;
 
 export interface SessionCard {
   id: string;

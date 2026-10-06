@@ -6,7 +6,6 @@ import { Sound } from "./core/sound";
 import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
-import { registerOpencodeHandlers } from "./island/opencode";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 
 async function main() {
@@ -62,8 +61,27 @@ async function main() {
   });
 
   registerHookHandlers(island);
-  registerOpencodeHandlers(island);
   registerIntegrationHandlers(island);
+
+  // The island's own tool card: same furniture as the hook relay's
+  // (pin, sound, alert-or-badge) minus relay specifics — no ack window, no
+  // timeout; the turn holds the chat command open until decide() resolves it.
+  void onEvent<{ requestId: string; tool: string; command: string }>(
+    "local-permission",
+    ({ requestId, tool, command }) => {
+      if (State.paused) return; // Rust auto-handles paused turns; nothing to show.
+      if (State.pendingApproval && State.pendingApproval.requestId !== requestId) return;
+      State.pendingApproval = { requestId, sessionId: "", tool, command, source: "local" };
+      State.isPinned = true;
+      Sound.play("approval");
+      if (State.mode === "expanded") island.setView("approval");
+      else {
+        State.setPillBadge("integration_claude", "approval");
+        island.reveal();
+      }
+      State.notify();
+    },
+  );
 
   island.launch();
 

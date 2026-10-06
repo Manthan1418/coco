@@ -14,18 +14,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# The OpenCode brain: status, approvals and the permission event feed.
-coco-engine = { path = "../engine" }
-# Stream combinators for driving the engine's SSE watch. The engine owns the
-# HTTP layer; this crate only consumes the stream it hands back.
-futures-util = "0.3"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "process", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Secrets: the freedesktop Secret Service (gnome-keyring / KWallet), the Linux

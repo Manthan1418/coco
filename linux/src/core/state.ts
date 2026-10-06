@@ -26,12 +26,9 @@ export interface ApprovalInfo {
   sessionId: string;
   tool: string;
   command: string;
-  /**
-   * Which backend answers `decide()`. The card is shared — one card, one
-   * request, whichever agent asked first — but a pipe answer and an
-   * OpenCode reply travel different transports.
-   */
-  source: "hook" | "opencode";
+  /** Which backend answers `decide()`: the Claude Code relay, or a local
+   * tool the island's own brain wants to run. */
+  source: "hook" | "local";
 }
 
 export interface ChatMessage {

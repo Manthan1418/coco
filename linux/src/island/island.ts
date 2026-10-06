@@ -139,21 +139,14 @@ export class Island {
         void Bridge.log(`decide ${d} req=${req?.requestId ?? "none"}`);
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
-        if (req.source === "opencode") {
-          // Answering a request that is already gone (TUI, timeout) rejects
-          // here — that is not a failure, the card just clears either way.
-          void Bridge.opencodeReply(req.sessionId, req.requestId, d === "deny" ? "deny" : "allow")
-            .catch((err) => Bridge.log(`opencode reply did not land: ${String(err)}`))
-            .finally(() => {
-              State.pendingApproval = null;
-              State.isPinned = false;
-              this.fsm.pinned = false;
-              State.setPillBadge("integration_claude", null);
-              this.setView(State.defaultView());
-            });
-          return;
+        if (req.source === "local") {
+          // The island's own tool card: resolve the turn's wait directly.
+          // Clearing is unconditional — a double-click resolves once (the
+          // second resolve finds no waiter) and the card must never stick.
+          void Bridge.localDecide(req.requestId, d !== "deny");
+        } else {
+          void Bridge.approvalDecision(req.requestId, d);
         }
-        void Bridge.approvalDecision(req.requestId, d);
         State.pendingApproval = null;
         State.isPinned = false;
         this.fsm.pinned = false;
