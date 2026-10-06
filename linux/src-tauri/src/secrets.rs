@@ -13,6 +13,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "openrouter-api-key",
     "openai-api-key",
     "custom-api-key",
+    "brave-api-key",
     "opencode-api-key",
     "n8n-url",
     "n8n-api-key",

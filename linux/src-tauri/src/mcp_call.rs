@@ -40,7 +40,14 @@ fn server_binary() -> Result<std::path::PathBuf, String> {
 /// half-answer, so the caller can degrade to tool-less instead of hanging.
 async fn exchange(requests: Vec<Value>) -> Result<Vec<Value>, String> {
     let bin = server_binary()?;
-    let mut child = tokio::process::Command::new(&bin)
+    let mut child = tokio::process::Command::new(&bin);
+    // Secrets never touch disk: the key travels process-env-only from the
+    // Secret Service into the server's memory. Absent key = the server's own
+    // setup error tells the model where to add it.
+    if let Some(key) = crate::secrets::get("brave-api-key") {
+        child.env("BRAVE_API_KEY", key);
+    }
+    let mut child = child
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

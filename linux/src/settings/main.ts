@@ -480,6 +480,8 @@ const INTEGRATIONS: IntegrationDef[] = [
     fields: [{ key: "github-token", label: "Token", placeholder: "ghp_…", secret: true }] },
   { id: "integration_vercel", name: "Vercel", color: "#7C5CFF",
     fields: [{ key: "vercel-token", label: "Token", placeholder: "…", secret: true }] },
+  { id: "integration_brave", name: "Brave Search", color: "#FB542B",
+    fields: [{ key: "brave-api-key", label: "API key", placeholder: "BSA…", secret: true }] },
   { id: "integration_n8n", name: "n8n", color: "#F29B38",
     fields: [
       { key: "n8n-url", label: "Instance URL", placeholder: "https://n8n.example.com", secret: false },

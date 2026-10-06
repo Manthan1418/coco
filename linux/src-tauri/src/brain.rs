@@ -157,6 +157,53 @@ fn require_gateway() -> Result<(), String> {
     Err("brain is starting — ask again in a few seconds.".to_string())
 }
 
+/// What the model would otherwise burn a probe per turn discovering: distro
+/// name from os-release, package manager inferred from it, today's date.
+/// Read once per turn; failure degrades to "unknown", never to an error.
+fn distro_name() -> String {
+    std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|t| {
+            t.lines().find_map(|l| {
+                l.strip_prefix("PRETTY_NAME=")
+                    .map(|v| v.trim_matches('"').to_string())
+            })
+        })
+        .unwrap_or_else(|| "Linux".to_string())
+}
+
+fn package_manager() -> &'static str {
+    let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
+        return "unknown";
+    };
+    let id = text
+        .lines()
+        .find_map(|l| l.strip_prefix("ID="))
+        .unwrap_or("")
+        .trim_matches('"');
+    let like = text
+        .lines()
+        .find_map(|l| l.strip_prefix("ID_LIKE="))
+        .unwrap_or("")
+        .trim_matches('"');
+    for token in format!("{id} {like}").split_whitespace() {
+        match token {
+            "arch" | "manjaro" | "endeavouros" | "cachyos" => return "pacman",
+            "debian" | "ubuntu" | "linuxmint" | "pop" => return "apt",
+            "fedora" | "rhel" | "centos" => return "dnf",
+            "opensuse" | "suse" => return "zypper",
+            "alpine" => return "apk",
+            "nixos" => return "nix",
+            _ => {}
+        }
+    }
+    "unknown"
+}
+
+fn chrono_lite_date() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 /// One chat turn, straight to the configured provider. The API key and any
@@ -244,7 +291,7 @@ fn persist(shared: &State<'_, crate::Shared>, chat: &State<'_, Chat>) {
 /// Tools the model may use freely: read-only or trivially reversible. Anything
 /// else (open_app, run_command, anything unrecognized) goes to the approval
 /// card — the island's human-in-the-loop, same as the hook relay's.
-const AUTO_TOOLS: &[&str] = &["notify", "find_files", "music", "memory_save", "memory_recall"];
+const AUTO_TOOLS: &[&str] = &["notify", "find_files", "music", "memory_save", "memory_recall", "web_search", "web_fetch"];
 const ASK_TOOLS: &[&str] = &["open_app", "run_command"];
 const MAX_ITERS: usize = 8;
 static LOCAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -295,6 +342,17 @@ async fn agent_turn(
     let profile = {
         let s = shared.settings.lock().unwrap();
         let mut parts = Vec::new();
+        // Ground truth the model would otherwise probe for (one uname/echo
+        // per turn, forever): OS, distro + package manager, desktop, date.
+        parts.push(format!(
+            "System: {} {} on {}, desktop {}, package manager {}, date {}",
+            std::env::consts::OS,
+            distro_name(),
+            std::env::consts::ARCH,
+            std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into()),
+            package_manager(),
+            chrono_lite_date(),
+        ));
         if !s.user_name.trim().is_empty() {
             parts.push(format!("Name: {}", s.user_name.trim()));
         }
@@ -322,6 +380,9 @@ async fn agent_turn(
         }
     };
 
+    // Per-turn argv memory, across all iterations: exact repeats return
+    // cached answers (see run_one_tool) instead of re-running and re-asking.
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for _ in 0..MAX_ITERS {
         let reply = C::post_chat_json(&url, provider, &key, model, &messages, tools.as_ref()).await?;
         let text = C::reply_text(&reply);
@@ -354,7 +415,7 @@ async fn agent_turn(
                 v @ Value::Object(_) => v.clone(),
                 _ => json!({}),
             };
-            let result = run_one_tool(&app, &pending, &rules, &call.name, &args).await;
+            let result = run_one_tool(&app, &pending, &rules, &mut seen, &call.name, &args).await;
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -410,11 +471,35 @@ fn rule_decision(
     None
 }
 
-/// One tool call through policy and, where required, the human.
+/// Commands with no side effects beyond answering: system facts, directory
+/// listings (names, never contents), and read-only package queries. These run
+/// without a card — asking twelve times for `uname` is how trust dies.
+/// Everything that reads FILE CONTENTS (cat, grep of files), writes, installs
+/// or touches the network still asks, because outputs flow to a third-party
+/// model and contents are exfiltration-shaped.
+fn readonly_command(argv: &[String]) -> bool {
+    let (first, rest) = match argv.split_first() {
+        Some(pair) => pair,
+        None => return false,
+    };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    match base {
+        "uname" | "echo" | "printf" | "whoami" | "date" | "pwd" | "hostname" | "who" | "id"
+        | "which" | "ls" | "true" | "basename" | "dirname" => true,
+        "pacman" => rest.first().map(|f| f.starts_with("-Q")).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// One tool call through policy and, where required, the human. `seen` is the
+/// turn's memory: an exact-repeat argv returns its cached answer with a nudge
+/// instead of re-running, because models that just probed successfully probe
+/// again (observed: the same echo four times in one turn).
 async fn run_one_tool(
     app: &AppHandle,
     pending: &State<'_, LocalPending>,
     rules: &[crate::settings::ToolRule],
+    seen: &mut std::collections::HashMap<String, String>,
     name: &str,
     args: &Value,
 ) -> String {
@@ -424,11 +509,11 @@ async fn run_one_tool(
     if !ASK_TOOLS.contains(&name) {
         // Not offered, so the model invented it. Say so outright — a silent
         // drop would teach it that calls vanish.
-        return format!("unknown tool {name:?}: only notify, open_app, find_files, music, run_command, memory_save and memory_recall exist.");
+        return format!("unknown tool {name:?}: only notify, open_app, find_files, music, run_command, memory_save, memory_recall, web_search and web_fetch exist.");
     }
     // Remembered rules, first match wins. Written by the human in settings,
     // never by the model — this is the "don't ask me for ls again" list.
-    // Unmatched tools fall through to the card below.
+    // Unmatched tools fall through below.
     if let Some(allow) = rule_decision(rules, name, args) {
         if allow {
             log::line(format!("tool rule allowed {name}"));
@@ -436,6 +521,27 @@ async fn run_one_tool(
         }
         log::line(format!("tool rule denied {name}"));
         return "Blocked by your remembered rules. Tell the user plainly and stop.".to_string();
+    }
+    // Read-only commands run free (see readonly_command for the boundary).
+    // Everything else that reaches here asks.
+    if name == "run_command" {
+        let argv: Vec<String> = args
+            .get("command")
+            .and_then(|c| c.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        if readonly_command(&argv) {
+            return mcp_text(name, args).await;
+        }
+        // Exact repeats hit the turn cache instead of re-running: same answer,
+        // plus a nudge the model actually obeys (it fetched this already).
+        let key = format!("run_command\0{}", argv.join("\0"));
+        if let Some(prev) = seen.get(&key) {
+            return format!("{prev}\n(already ran this exact command — same result, do not call again.)");
+        }
+        let out = mcp_text(name, args).await;
+        seen.insert(key, out.clone());
+        return out;
     }
     if crate::integrations::PAUSED.load(Ordering::Relaxed) {
         // Paused means paused: no cards, no waits, no side effects. The turn
@@ -455,7 +561,18 @@ async fn run_one_tool(
     match rx.await {
         Ok(true) => {
             log::line(format!("local permission {id} allowed ({name})"));
-            mcp_text(name, args).await
+            let out = mcp_text(name, args).await;
+            // Cache approved runs too, or the model re-asks and re-runs them.
+            if name == "run_command" {
+                if let Some(argv) = args.get("command").and_then(|c| c.as_array()) {
+                    let argv: Vec<String> = argv
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect();
+                    seen.insert(format!("run_command\0{}", argv.join("\0")), out.clone());
+                }
+            }
+            out
         }
         // Denied — or the app died mid-wait and the sender vanished. Either
         // way the turn continues with words, never with a hang.
@@ -679,5 +796,29 @@ mod tests {
         // Sudo prefixes the match haystack, so "sudo ls" still matches "ls".
         let sudo = json!({"command": ["ls"], "sudo": true});
         assert_eq!(rule_decision(&rules, "run_command", &sudo), Some(true));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::readonly_command;
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn readonly_boundary() {
+        // The exact probes the model burned twelve cards on: free now.
+        assert!(readonly_command(&argv(&["uname", "-a"])));
+        assert!(readonly_command(&argv(&["echo", "$XDG_CURRENT_DESKTOP"])));
+        assert!(readonly_command(&argv(&["pacman", "-Qs", "calculator"])));
+        assert!(readonly_command(&argv(&["ls", "-la"])));
+        // Writes, installs, file contents, pipes: still ask.
+        assert!(!readonly_command(&argv(&["pacman", "-S", "x"])));
+        assert!(!readonly_command(&argv(&["cat", "/etc/passwd"])));
+        assert!(!readonly_command(&argv(&["sudo", "apt", "install", "x"])));
+        assert!(!readonly_command(&argv(&["bash", "-c", "echo hi"])));
+        assert!(!readonly_command(&[]));
     }
 }

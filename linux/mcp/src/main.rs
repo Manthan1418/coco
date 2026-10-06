@@ -406,12 +406,21 @@ fn tool_run_command(args: &Value) -> Value {
     // sudo goes through polkit: the system shows its own password dialog and
     // Coco never sees the secret. argv stays an array — pkexec takes the
     // command the same way, so the no-shell property survives elevation.
+    // A leading `sudo` in argv is dropped: it would double-elevate
+    // (pkexec sudo …), and models habitually include it out of muscle memory.
+    let mut argv_owned: Vec<String> = command;
+    if sudo && argv_owned.first().map(|c| c == "sudo").unwrap_or(false) {
+        argv_owned.remove(0);
+    }
+    if argv_owned.is_empty() {
+        return tool_error("nothing left after dropping sudo".to_string());
+    }
     let (prog, argv): (&str, Vec<&str>) = if sudo {
         let mut full = vec!["pkexec"];
-        full.extend(command.iter().map(String::as_str));
+        full.extend(argv_owned.iter().map(String::as_str));
         ("pkexec", full)
     } else {
-        (command[0].as_str(), command.iter().map(String::as_str).collect())
+        (argv_owned[0].as_str(), argv_owned.iter().map(String::as_str).collect())
     };
 
     use std::os::unix::process::CommandExt;
@@ -550,6 +559,23 @@ fn tool_list() -> Value {
                 "query": {"type": "string", "description": "Words to look for"},
                 "max_results": {"type": "integer", "default": 5}
             }, "required": ["query"]}
+        },
+        {
+            "name": "web_search",
+            "description": "Search the web for how-tos, recommendations, docs and current facts. Prefer this over guessing commands, package names or syntax from training data.",
+            "annotations": {"readOnlyHint": true},
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "The search, e.g. 'best calculator app Arch Linux'"},
+                "max_results": {"type": "integer", "default": 5}
+            }, "required": ["query"]}
+        },
+        {
+            "name": "web_fetch",
+            "description": "Fetch a page as text (docs, guides, release notes). Use after web_search for the actual instructions. http(s) only, truncated past 100KB.",
+            "annotations": {"readOnlyHint": true},
+            "inputSchema": {"type": "object", "properties": {
+                "url": {"type": "string"}
+            }, "required": ["url"]}
         }
     ]})
 }
@@ -558,6 +584,144 @@ fn memory_file() -> PathBuf {
     let dir = home().join(".local/share/coco/memory");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("facts.jsonl")
+}
+
+/// Brave Search: the model's way of knowing things instead of guessing them
+/// (package names, current docs, recommendations). Key comes from the
+/// environment — the app injects the Secret Service value at spawn, so it
+/// never touches disk. Missing key fails with its own setup instructions.
+fn tool_web_search(args: &Value) -> Value {
+    let query: String = match required(args, "query") {
+        Ok(q) => q,
+        Err(e) => return tool_error(e),
+    };
+    let max: usize = arg(args, "max_results").unwrap_or_default().unwrap_or(5).clamp(1, 10);
+    let key = std::env::var("BRAVE_API_KEY").unwrap_or_default();
+    if key.trim().is_empty() {
+        return tool_error(
+            "web search needs a Brave API key (free tier at brave.com/search/api) — add it in Coco settings under Integrations, key name brave-api-key.".to_string(),
+        );
+    }
+    let out = Command::new("curl")
+        .arg("-sS")
+        .arg("--max-time")
+        .arg("20")
+        .arg("-H")
+        .arg(format!("X-Subscription-Token: {key}"))
+        .arg("-G")
+        .arg("https://api.search.brave.com/res/v1/web/search")
+        .arg("--data-urlencode")
+        .arg(format!("q={query}"))
+        .arg("--data-urlencode")
+        .arg(format!("count={max}"))
+        .output();
+    let Ok(out) = out else {
+        return tool_error("curl is not installed".to_string());
+    };
+    if !out.status.success() {
+        return tool_error(format!(
+            "search failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let v: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => return tool_error("search returned garbage".to_string()),
+    };
+    let results = v
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if results.is_empty() {
+        return ok_text("no results".to_string());
+    }
+    let lines: Vec<String> = results
+        .iter()
+        .take(max)
+        .filter_map(|r| {
+            let title = r.get("title").and_then(Value::as_str).unwrap_or("");
+            let url = r.get("url").and_then(Value::as_str).unwrap_or("");
+            let desc = r.get("description").and_then(Value::as_str).unwrap_or("");
+            if url.is_empty() {
+                return None;
+            }
+            Some(format!("- {title}\n  {url}\n  {desc}"))
+        })
+        .collect();
+    ok_text(lines.join("\n"))
+}
+
+/// Fetch a URL as text. curl does TLS and redirects; the cap keeps a runaway
+/// page out of the model's context. http(s) only — no file://, no gopher, no
+/// cleverness.
+fn tool_web_fetch(args: &Value) -> Value {
+    let url: String = match required(args, "url") {
+        Ok(u) => u,
+        Err(e) => return tool_error(e),
+    };
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return tool_error("only http(s) URLs".to_string());
+    }
+    let out = Command::new("curl")
+        .arg("-sSL")
+        .arg("--max-time")
+        .arg("20")
+        .arg("--max-filesize")
+        .arg("102400")
+        .arg("-A")
+        .arg("Coco/0.1 (research fetch)")
+        .arg(url)
+        .output();
+    let Ok(out) = out else {
+        return tool_error("curl is not installed".to_string());
+    };
+    if !out.status.success() {
+        return tool_error("fetch failed (network, 404, or over the size cap)".to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Strip tags crudely: research needs words, and raw HTML buries them.
+    // Not a sanitizer — output goes to the model, never to a browser.
+    let mut plain = String::with_capacity(text.len().min(102400));
+    let mut in_tag = false;
+    let mut skip_depth: u32 = 0; // inside <style>/<script>: CSS/JS is not reading material
+    let mut tag_buf = String::new();
+    for c in text.chars() {
+        if c == '<' {
+            in_tag = true;
+            tag_buf.clear();
+        } else if c == '>' {
+            in_tag = false;
+            let tag = tag_buf.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+            if tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script") {
+                if tag_buf.starts_with('/') {
+                    skip_depth = skip_depth.saturating_sub(1);
+                } else {
+                    skip_depth += 1;
+                }
+            }
+        } else if in_tag {
+            tag_buf.push(c);
+        } else if skip_depth == 0 {
+            plain.push(c);
+        }
+        if plain.len() > 60000 {
+            plain.push_str("\n…(truncated)");
+            break;
+        }
+    }
+    let cleaned: String = plain
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if cleaned.is_empty() {
+        return tool_error("page had no readable text".to_string());
+    }
+    ok_text(cleaned)
 }
 
 fn now_unix() -> u64 {
@@ -746,6 +910,8 @@ fn main() {
                     "run_command" => tool_run_command(&args),
                     "memory_save" => tool_memory_save(&args),
                     "memory_recall" => tool_memory_recall(&args),
+                    "web_search" => tool_web_search(&args),
+                    "web_fetch" => tool_web_fetch(&args),
                     _ => tool_error(format!("unknown tool {name:?}")),
                 };
                 let outcome = result
