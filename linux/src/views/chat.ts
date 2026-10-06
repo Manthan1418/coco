@@ -45,14 +45,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     placeholder: "Ask me anything…",
     spellcheck: "false",
   }) as HTMLInputElement;
+  // One button, two modes: arrow sends, cross stops the running turn.
   const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
-  const stop = h("button", { class: "ghost-btn", title: "Stop this turn" }, svg(ICONS.xmark, 11));
-  stop.addEventListener("click", () => {
-    if (!State.chatSending) return;
-    void Bridge.chatCancel();
-  });
+  let sendMode: "send" | "stop" = "send";
   const histBtn = h("button", { class: "ghost-btn", title: "Conversations" }, svg(ICONS.timer, 12));
-  const bar = h("div", { class: "chat-bar" }, input, histBtn, stop, send);
+  const bar = h("div", { class: "chat-bar" }, input, histBtn, send);
   const histPane = h("div", { class: "hist-list" });
   histPane.style.display = "none"; // See showHistory: author display:flex beats [hidden].
 
@@ -224,7 +221,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     }
   }
 
-  send.addEventListener("click", () => void submit());
+  send.addEventListener("click", () => {
+    if (State.chatSending) void Bridge.chatCancel();
+    else void submit();
+  });
   input.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Enter") {
       e.preventDefault();
@@ -259,6 +259,14 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         log.scrollTop = log.scrollHeight;
       }
 
+      const mode = State.chatSending ? "stop" : "send";
+      if (mode !== sendMode) {
+        sendMode = mode;
+        clear(send);
+        send.append(svg(mode === "stop" ? ICONS.xmark : ICONS.arrowUp, 11));
+        send.title = mode === "stop" ? "Stop this turn" : "Send";
+        send.classList.toggle("stop", mode === "stop");
+      }
       input.placeholder = State.chatHistory.length === 0 ? "Ask me anything…" : "Continue…";
       input.disabled = State.chatSending;
     },

@@ -891,6 +891,12 @@ input[type="range"]::-webkit-slider-thumb {
   transform: scale(0.94);
 }
 
+/* Stop mode: same button, warm signal. Swapped with the arrow in sync(). */
+.send-btn.stop {
+  background: #f0665f;
+  color: #0b0c0e;
+}
+
 /* Conversation history: same card language as the chat log, quieter. */
 .ghost-btn {
   width: 28px;
