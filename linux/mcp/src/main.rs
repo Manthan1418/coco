@@ -589,7 +589,8 @@ fn memory_file() -> PathBuf {
 /// Brave Search: the model's way of knowing things instead of guessing them
 /// (package names, current docs, recommendations). Key comes from the
 /// environment — the app injects the Secret Service value at spawn, so it
-/// never touches disk. Missing key fails with its own setup instructions.
+/// never touches disk. No key, or a failed keyed call, falls back to
+/// DuckDuckGo HTML below: worse snippets, zero setup, no account.
 fn tool_web_search(args: &Value) -> Value {
     let query: String = match required(args, "query") {
         Ok(q) => q,
@@ -597,11 +598,27 @@ fn tool_web_search(args: &Value) -> Value {
     };
     let max: usize = arg(args, "max_results").unwrap_or_default().unwrap_or(5).clamp(1, 10);
     let key = std::env::var("BRAVE_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        return tool_error(
-            "web search needs a Brave API key (free tier at brave.com/search/api) — add it in Coco settings under Integrations, key name brave-api-key.".to_string(),
-        );
+    if !key.trim().is_empty() {
+        match brave_search(&key, &query, max) {
+            Ok(text) => return ok_text(text),
+            Err(err) => {
+                // A configured key that fails should still leave the agent
+                // working — say so in one line and fall through to DDG.
+                let fallback = ddg_search(&query, max);
+                return match fallback {
+                    Ok(text) => ok_text(format!("(Brave failed: {err}; DuckDuckGo fallback)\n{text}")),
+                    Err(_) => tool_error(format!("Brave failed ({err}); fallback failed too")),
+                };
+            }
+        }
     }
+    match ddg_search(&query, max) {
+        Ok(text) => ok_text(text),
+        Err(err) => tool_error(err),
+    }
+}
+
+fn brave_search(key: &str, query: &str, max: usize) -> Result<String, String> {
     let out = Command::new("curl")
         .arg("-sS")
         .arg("--max-time")
@@ -614,20 +631,15 @@ fn tool_web_search(args: &Value) -> Value {
         .arg(format!("q={query}"))
         .arg("--data-urlencode")
         .arg(format!("count={max}"))
-        .output();
-    let Ok(out) = out else {
-        return tool_error("curl is not installed".to_string());
-    };
+        .output()
+        .map_err(|_| "curl is not installed".to_string())?;
     if !out.status.success() {
-        return tool_error(format!(
+        return Err(format!(
             "search failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let v: Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(_) => return tool_error("search returned garbage".to_string()),
-    };
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(|_| "search returned garbage".to_string())?;
     let results = v
         .get("web")
         .and_then(|w| w.get("results"))
@@ -635,7 +647,7 @@ fn tool_web_search(args: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
     if results.is_empty() {
-        return ok_text("no results".to_string());
+        return Err("no results".to_string());
     }
     let lines: Vec<String> = results
         .iter()
@@ -650,7 +662,142 @@ fn tool_web_search(args: &Value) -> Value {
             Some(format!("- {title}\n  {url}\n  {desc}"))
         })
         .collect();
-    ok_text(lines.join("\n"))
+    Ok(lines.join("\n"))
+}
+
+/// Keyless fallback: DuckDuckGo's HTML endpoint. Unofficial and scrape-y —
+/// layouts change, rate limits bite — but it needs no account and answers
+/// today. Parsed by hand (no HTML deps): result__a anchors carry titles,
+/// result__snippet anchors carry snippets, joined on the uddg redirect param.
+fn ddg_search(query: &str, max: usize) -> Result<String, String> {
+    let out = Command::new("curl")
+        .arg("-sSL")
+        .arg("--max-time")
+        .arg("20")
+        .arg("-A")
+        .arg("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+        .arg("-G")
+        .arg("https://html.duckduckgo.com/html/")
+        .arg("--data-urlencode")
+        .arg(format!("q={query}"))
+        .output()
+        .map_err(|_| "curl is not installed".to_string())?;
+    if !out.status.success() {
+        return Err("search failed (network or blocked)".to_string());
+    }
+    let html = String::from_utf8_lossy(&out.stdout);
+    // title anchors, in document order, then their snippets.
+    let mut titles: Vec<(String, String)> = Vec::new(); // (uddg-url, title)
+    let mut snippets: Vec<(String, String)> = Vec::new();
+    for (marker, store) in [("result__a", &mut titles), ("result__snippet", &mut snippets)] {
+        let mut rest = html.as_ref();
+        while let Some(m) = rest.find(marker) {
+            let chunk = &rest[m..];
+            let href = chunk
+                .find("href=\"")
+                .and_then(|i| {
+                    let after = &chunk[i + 6..];
+                    after.find('"').map(|j| &after[..j])
+                })
+                .unwrap_or("");
+            let text = chunk
+                .find('>')
+                .and_then(|i| {
+                    let after = &chunk[i + 1..];
+                    after.find("</a>").map(|j| after[..j].trim().to_string())
+                })
+                .unwrap_or_default();
+            let url = redirect_target(href);
+            if !url.is_empty() && !text.is_empty() {
+                store.push((url, html_unescape(&text)));
+            }
+            rest = &chunk[marker.len()..];
+        }
+    }
+    if titles.is_empty() {
+        return Err("no results (layout changed or rate-limited?)".to_string());
+    }
+    let snip_by_url: std::collections::HashMap<&str, &str> = snippets
+        .iter()
+        .map(|(u, s)| (u.as_str(), s.as_str()))
+        .collect();
+    let lines: Vec<String> = titles
+        .iter()
+        .take(max)
+        .map(|(url, title)| match snip_by_url.get(url.as_str()) {
+            Some(snip) => format!("- {}\n  {url}\n  {}", strip_tags(title), strip_tags(snip)),
+            None => format!("- {}\n  {url}", strip_tags(title)),
+        })
+        .collect();
+    Ok(lines.join("\n"))
+}
+
+/// Snippet text arrives with inline <b>/<i> markers; drop all tags.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    html_unescape(&out)
+}
+
+/// DDG wraps outbound links: //duckduckgo.com/l/?uddg=<pct-encoded>&rut=….
+/// Unwrap to the destination; pass anything else through (fixing //-relative).
+fn redirect_target(href: &str) -> String {
+    let url = if let Some(i) = href.find("uddg=") {
+        let after = &href[i + 5..];
+        let end = after.find('&').map(|j| &after[..j]).unwrap_or(after);
+        percent_decode(end)
+    } else {
+        href.to_string()
+    };
+    if url.starts_with("//") {
+        format!("https:{url}")
+    } else {
+        url
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4 | l) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
 }
 
 /// Fetch a URL as text. curl does TLS and redirects; the cap keeps a runaway
