@@ -442,6 +442,8 @@ pub fn run() {
             brain::local_decide,
             brain::chat_sessions,
             brain::chat_open,
+            brain::chat_rename,
+            brain::chat_delete,
             ingest_file,
             secret_present,
             secret_set,

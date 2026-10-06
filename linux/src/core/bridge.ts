@@ -86,6 +86,10 @@ export const Bridge = {
   chatSessions: () => callOrThrow<SessionCard[]>("chat_sessions"),
   /** Resume one: restores its history and returns its transcript. */
   chatOpen: (id: string) => callOrThrow<ChatMsg[]>("chat_open", { id }),
+  /** Rename one: changes the list's label, nothing else. */
+  chatRename: (id: string, title: string) => callOrThrow<void>("chat_rename", { id, title }),
+  /** Delete one for good. Resolves `true` when it was the conversation open. */
+  chatDelete: (id: string) => callOrThrow<boolean>("chat_delete", { id }),
 
   // ── Chat, files, secrets ──────────────────────────────────────────────────
   /** One chat turn, straight to the configured provider. The API key and any

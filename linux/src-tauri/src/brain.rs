@@ -58,11 +58,31 @@ fn title_for(query: &str) -> String {
 }
 
 fn load_convo(id: &str) -> Option<StoredConvo> {
-    if id.contains('/') || id.contains('\\') || id.contains('\0') || id.is_empty() {
+    let bytes = std::fs::read(convo_path(id)?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// A conversation id IS its filename, so anything that could climb out of the
+/// chats directory is refused rather than sanitised — there is no such thing as
+/// a legitimate id with a separator in it.
+fn convo_path(id: &str) -> Option<std::path::PathBuf> {
+    let bogus =
+        id.is_empty() || id.contains('/') || id.contains('\\') || id.contains('\0') || id.contains("..");
+    if bogus {
         return None;
     }
-    let bytes = std::fs::read(chats_dir().join(format!("{id}.json"))).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    Some(chats_dir().join(format!("{id}.json")))
+}
+
+/// A hand-typed title: whitespace collapsed (a pasted paragraph must not wrap
+/// the row), capped so the list still ellipsises, blank → "Untitled".
+fn clean_title(raw: &str) -> String {
+    let short: String = raw.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+    if short.is_empty() {
+        "Untitled".to_string()
+    } else {
+        short
+    }
 }
 
 fn save_convo(convo: &StoredConvo) {
@@ -834,6 +854,38 @@ pub fn chat_open(chat: State<'_, Chat>, id: String) -> Result<Vec<ChatMsg>, Stri
         .collect())
 }
 
+/// Rename a conversation. Only the list's label changes — the transcript, the
+/// wire history and the auto-title used before this call all stay put.
+#[tauri::command]
+pub fn chat_rename(id: String, title: String) -> Result<(), String> {
+    let mut convo = load_convo(&id).ok_or_else(|| "conversation not found".to_string())?;
+    convo.title = clean_title(&title);
+    save_convo(&convo);
+    log::line(format!("conversation renamed: {}", convo.title));
+    Ok(())
+}
+
+/// Delete a conversation for good. Returns whether it was the one open: if so
+/// the chat state is reset here, so the next send starts a fresh file instead
+/// of resurrecting the deleted one through `persist`.
+#[tauri::command]
+pub fn chat_delete(chat: State<'_, Chat>, id: String) -> Result<bool, String> {
+    let path = convo_path(&id).ok_or_else(|| "conversation not found".to_string())?;
+    let was_open = chat.convo().as_deref() == Some(id.as_str());
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err("conversation not found".to_string())
+        }
+        Err(err) => return Err(format!("could not delete: {err}")),
+    }
+    if was_open {
+        chat.reset();
+    }
+    log::line(format!("conversation deleted: {id}"));
+    Ok(was_open)
+}
+
 // ── MCP hands (installed helper only) ───────────────────────────────────────
 
 /// Install the system-action server binary (same layout as the hook relay).
@@ -883,9 +935,26 @@ pub fn ensure_mcp() {
 
 #[cfg(test)]
 mod tests {
-    use super::rule_decision;
+    use super::{clean_title, convo_path, rule_decision};
     use crate::settings::ToolRule;
     use serde_json::json;
+
+    #[test]
+    fn hand_typed_titles_collapse_and_cap() {
+        // A pasted paragraph must not wrap the row; blank must not empty it.
+        assert_eq!(clean_title("  a\n   b   c  "), "a b c");
+        assert_eq!(clean_title(" \n\t "), "Untitled");
+        assert_eq!(clean_title(&"x".repeat(400)).chars().count(), 60);
+    }
+
+    #[test]
+    fn ids_that_could_climb_out_of_the_chats_dir_are_refused() {
+        assert!(convo_path("../settings").is_none());
+        assert!(convo_path("a/b").is_none());
+        assert!(convo_path("").is_none());
+        // The real shape: c + timestamp digits, no separators ever.
+        assert!(convo_path("c1791298690946").is_some());
+    }
 
     fn rule(tool: &str, m: &str, allow: bool) -> ToolRule {
         ToolRule { tool: tool.into(), r#match: m.into(), allow }

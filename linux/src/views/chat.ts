@@ -88,8 +88,106 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (open) void loadHistory();
   }
 
-  async function loadHistory() {
+  /** One conversation row: click opens it, hover reveals rename and delete. */
+  function sessionRow(s: SessionCard): HTMLElement {
+    const title = h("span", { class: "hist-title", text: s.title });
+    const row = h(
+      "button",
+      { class: "hist-row", title: s.title },
+      title,
+      h("span", { class: "hist-time", text: relTime(s.updated) }),
+    );
+    row.addEventListener("click", () => void openConversation(s.id));
+
+    const pencil = h(
+      "button",
+      { class: "hist-act", title: "Rename" },
+      svg(ICONS.pencil, 13, { stroke: 1.7 }),
+    );
+    const trash = h(
+      "button",
+      { class: "hist-act", title: "Delete" },
+      svg(ICONS.trash, 13, { stroke: 1.7 }),
+    );
+
+    // Rename in place: the title span becomes a field, Enter/blur commits,
+    // Escape puts the old one back. `done` gates blur too — it fires right
+    // after Enter, and one rename must not fire twice.
+    pencil.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const field = h("input", { class: "hist-rename", type: "text", spellcheck: "false" }) as HTMLInputElement;
+      field.value = s.title;
+      title.replaceWith(field);
+      row.title = "";
+      field.focus();
+      field.select();
+      let done = false;
+      const finish = (commit: boolean) => {
+        if (done) return;
+        done = true;
+        const next = field.value;
+        field.replaceWith(title);
+        row.title = s.title;
+        if (!commit || next.trim() === s.title) return;
+        void Bridge.chatRename(s.id, next).then(
+          () => void loadHistory(),
+          (err) => void loadHistory(`Couldn't rename it: ${String(err).replace(/^Error:\s*/, "")}`),
+        );
+      };
+      field.addEventListener("keydown", (ev2) => {
+        const key = (ev2 as KeyboardEvent).key;
+        if (key === "Enter") {
+          ev2.preventDefault();
+          finish(true);
+        } else if (key === "Escape") {
+          ev2.preventDefault();
+          finish(false);
+        }
+        ev2.stopPropagation(); // Escape closes the island, not the history pane
+      });
+      field.addEventListener("blur", () => finish(true));
+    });
+
+    // Delete asks twice: one click arms the button, the second does it. There
+    // is no undo, so a stray click must not be enough — and no dialog that
+    // could get lost behind the island.
+    let armed = false;
+    trash.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (!armed) {
+        armed = true;
+        trash.classList.add("armed");
+        trash.title = "Click again to delete";
+        return;
+      }
+      void Bridge.chatDelete(s.id).then(
+        (wasOpen) => {
+          // Deleted the conversation on screen: go back to an empty one, or
+          // the bubbles would outlive their file.
+          if (wasOpen) {
+            State.chatHistory = [];
+            State.chatGen++;
+            State.chatSending = false;
+            State.chatProgress = null;
+            State.chatStream = "";
+            State.stateOverride = null;
+            State.view = "prompt";
+          }
+          void loadHistory();
+          State.notify();
+          onHeightChange();
+        },
+        (err) => void loadHistory(`Couldn't delete it: ${String(err).replace(/^Error:\s*/, "")}`),
+      );
+    });
+
+    const actions = h("span", { class: "hist-actions" }, pencil, trash);
+    return h("div", { class: "hist-item" }, row, actions);
+  }
+
+  async function loadHistory(note?: string) {
     clear(histPane);
+    if (note) histPane.append(h("div", { class: "hist-empty hist-error", text: note }));
     histPane.append(h("div", { class: "hist-empty", text: "Loading…" }));
     let sessions: SessionCard[];
     try {
@@ -100,6 +198,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       return;
     }
     clear(histPane);
+    if (note) histPane.append(h("div", { class: "hist-empty hist-error", text: note }));
     const fresh = h(
       "button",
       { class: "hist-row hist-new", title: "Start a new conversation" },
@@ -124,16 +223,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       histPane.append(h("div", { class: "hist-empty", text: "No conversations yet." }));
       return;
     }
-    for (const s of sessions) {
-      const row = h(
-        "button",
-        { class: "hist-row", title: s.title },
-        h("span", { class: "hist-title", text: s.title }),
-        h("span", { class: "hist-time", text: relTime(s.updated) }),
-      );
-      row.addEventListener("click", () => void openConversation(s.id));
-      histPane.append(row);
-    }
+    for (const s of sessions) histPane.append(sessionRow(s));
   }
 
   async function openConversation(id: string) {
