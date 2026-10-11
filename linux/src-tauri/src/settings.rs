@@ -50,6 +50,24 @@ pub struct Settings {
     /// ask — nothing is silently allowed except the hardcoded read-only set.
     #[serde(default)]
     pub tool_rules: Vec<ToolRule>,
+    /// SMTP server used by the island's "send by email". Only the password is a
+    /// secret (Secret Service, `smtp-password`); these are plain preferences.
+    #[serde(default = "default_smtp_host")]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    /// "starttls" (587), "tls" (implicit, 465) or "none".
+    #[serde(default = "default_smtp_security")]
+    pub smtp_security: String,
+    /// Login user for SMTP AUTH. Empty means no authentication (a local relay).
+    #[serde(default)]
+    pub smtp_user: String,
+    /// From address. Empty falls back to the login user.
+    #[serde(default)]
+    pub smtp_from: String,
+    /// Recipient the mail view prefills.
+    #[serde(default)]
+    pub smtp_to: String,
 }
 
 /// One remembered answer. Written from the settings screen, never by the
@@ -76,6 +94,20 @@ fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
 }
 
+/// Gmail's submission endpoint — the most likely choice, and harmless for
+/// anyone who overrides it.
+fn default_smtp_host() -> String {
+    "smtp.gmail.com".to_string()
+}
+
+fn default_smtp_port() -> u16 {
+    587
+}
+
+fn default_smtp_security() -> String {
+    "starttls".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -100,6 +132,12 @@ impl Default for Settings {
             music_taste: String::new(),
             setup_notes: String::new(),
             tool_rules: Vec::new(),
+            smtp_host: default_smtp_host(),
+            smtp_port: default_smtp_port(),
+            smtp_security: default_smtp_security(),
+            smtp_user: String::new(),
+            smtp_from: String::new(),
+            smtp_to: String::new(),
         }
     }
 }

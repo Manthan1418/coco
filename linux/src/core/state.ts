@@ -109,6 +109,15 @@ export interface Settings {
   setupNotes: string;
   /** Remembered approval answers, first match wins. Written here, never by the model. */
   toolRules: { tool: string; match: string; allow: boolean }[];
+  /** SMTP server for the island's "send by email". Password is in the keyring. */
+  smtpHost: string;
+  smtpPort: number;
+  /** "starttls" (587), "tls" (implicit 465) or "none". */
+  smtpSecurity: string;
+  smtpUser: string;
+  smtpFrom: string;
+  /** Prefilled recipient in the mail view. */
+  smtpTo: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -130,6 +139,12 @@ export const DEFAULT_SETTINGS: Settings = {
   musicTaste: "",
   setupNotes: "",
   toolRules: [],
+  smtpHost: "smtp.gmail.com",
+  smtpPort: 587,
+  smtpSecurity: "starttls",
+  smtpUser: "",
+  smtpFrom: "",
+  smtpTo: "",
 };
 
 type Listener = () => void;

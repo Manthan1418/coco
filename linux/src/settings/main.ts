@@ -353,6 +353,127 @@ function apiSection(hasKey: boolean): HTMLElement {
   );
 }
 
+// ── Email (SMTP) section ──────────────────────────────────────────────────────
+// The macOS app handed files to Mail.app; this Linux build speaks SMTP itself,
+// so the server and addresses live here. Only the password is a secret.
+function emailSection(hasPassword: boolean): HTMLElement {
+  const row = (label: string, ...controls: HTMLElement[]) =>
+    h("div", { class: "row" }, h("label", { text: label }), ...controls);
+
+  const textField = (
+    value: string,
+    placeholder: string,
+    set: (v: string) => void,
+    width = "220px",
+  ) => {
+    const input = h("input", {
+      type: "text",
+      value,
+      placeholder,
+      style: `width:${width}`,
+      autocomplete: "off",
+      spellcheck: "false",
+    }) as HTMLInputElement;
+    input.addEventListener("change", () => {
+      set(input.value.trim());
+      void save();
+    });
+    return input;
+  };
+
+  const host = textField(settings.smtpHost, "smtp.gmail.com", (v) => { settings.smtpHost = v; });
+
+  const port = h("input", {
+    type: "number", min: "1", max: "65535",
+    value: String(settings.smtpPort),
+    style: "width:84px",
+  }) as HTMLInputElement;
+  port.addEventListener("change", () => {
+    settings.smtpPort = Math.max(1, Math.min(65535, Number(port.value) || 587));
+    port.value = String(settings.smtpPort);
+    void save();
+  });
+
+  const security = h("select", {}) as HTMLSelectElement;
+  security.append(
+    h("option", { value: "starttls", text: "STARTTLS (587)" }),
+    h("option", { value: "tls", text: "TLS (465)" }),
+    h("option", { value: "none", text: "No encryption" }),
+  );
+  security.value = settings.smtpSecurity || "starttls";
+  security.addEventListener("change", () => {
+    settings.smtpSecurity = security.value;
+    void save();
+  });
+
+  const user = textField(settings.smtpUser, "you@gmail.com", (v) => { settings.smtpUser = v; });
+  const from = textField(settings.smtpFrom, "defaults to the username", (v) => { settings.smtpFrom = v; });
+  const to = textField(settings.smtpTo, "prefilled recipient", (v) => { settings.smtpTo = v; });
+
+  const dot = statusDot(hasPassword);
+  const pw = h("input", {
+    type: "password",
+    placeholder: hasPassword ? "••••••••••••  (stored)" : "app password",
+    style: "flex:1 1 auto;min-width:0",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  const savePw = h("button", { class: "primary", text: "Save password" });
+  const removePw = h("button", { class: "danger", text: "Remove" });
+  const feedback = h("div", {});
+
+  async function refresh() {
+    const present = (await Bridge.secretPresent("smtp-password")) ?? false;
+    dot.style.background = present ? "#22c55e" : "#f4505e";
+    pw.placeholder = present ? "••••••••••••  (stored)" : "app password";
+    removePw.style.display = present ? "" : "none";
+  }
+  savePw.addEventListener("click", async () => {
+    const value = pw.value.trim();
+    if (!value) return;
+    clear(feedback);
+    try {
+      await Bridge.secretSet("smtp-password", value);
+      pw.value = "";
+      feedback.append(h("div", { class: "notice ok", text: "Saved in the Secret Service." }));
+      await refresh();
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
+    }
+  });
+  removePw.addEventListener("click", async () => {
+    clear(feedback);
+    try {
+      await Bridge.secretClear("smtp-password");
+      feedback.append(h("div", { class: "notice ok", text: "Password removed." }));
+      await refresh();
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
+    }
+  });
+  removePw.style.display = hasPassword ? "" : "none";
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, dot, h("span", { text: "Email" })),
+    row("SMTP server", host),
+    row("Port", h("span", { style: "display:flex;gap:8px;align-items:center" }, port, security)),
+    row("Username", user),
+    row("From", from),
+    row("Default to", to),
+    row(
+      "Password",
+      h("span", { style: "display:flex;gap:8px;align-items:center;flex:1 1 auto;min-width:0" }, pw, savePw, removePw),
+    ),
+    h("div", {
+      class: "hint",
+      text: "Gmail needs a 16-character App Password (Google Account → Security → 2-Step Verification), not your normal password. Used when you drop a file and pick “Send by email”.",
+    }),
+    feedback,
+  );
+}
+
 // ── Profile section ─────────────────────────────────────────────────────────
 // Who you are, in your own words. Plain text, stored in settings.json (not a
 // secret), read into every turn's system prompt. The model also keeps its own
@@ -668,6 +789,7 @@ async function main() {
     : settings.provider === "custom" ? "custom-api-key"
     : "anthropic-api-key";
   const hasKey = (await Bridge.secretPresent(providerKey)) ?? false;
+  const hasSmtp = (await Bridge.secretPresent("smtp-password")) ?? false;
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
@@ -681,6 +803,7 @@ async function main() {
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     apiSection(hasKey),
+    emailSection(hasSmtp),
     profileSection(),
     rulesSection(),
     integrationsSection(present),

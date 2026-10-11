@@ -52,3 +52,13 @@ raw-window-handle = "0.6"
 # The webview widget's own focus: X11 focus alone does not make WebKitGTK treat
 # the document as focused, so the chat's text field could never be typed into.
 gtk = { version = "0.18", features = ["v3_24"] }
+
+# Sending the dropped file (or a note) by email. macOS handed this to Mail.app
+# over AppleScript; Linux has no universal mail client, so Coco speaks SMTP. Pinned
+# to rustls to match reqwest — no system OpenSSL to depend on.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "rustls-tls",
+    "builder",
+    "hostname",
+] }

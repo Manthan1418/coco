@@ -844,15 +844,17 @@ export class Island {
       if (on) view.sync();
     }
 
-    // The chat is the only view with a text field, so it is the only time the
-    // island is allowed to take keyboard focus.
+    // The chat and the mail form are the only views with a text field, so they
+    // are the only times the island is allowed to take keyboard focus.
     if (this.lastSyncedView !== State.view) {
-      const wasChat = this.lastSyncedView === "prompt";
-      this.lastSyncedView = State.view;
-      if (State.view === "prompt") {
+      const view = State.view;
+      const wasText = this.lastSyncedView === "prompt" || this.lastSyncedView === "mail";
+      const wantsKeys = view === "prompt" || view === "mail";
+      this.lastSyncedView = view;
+      if (wantsKeys) {
         void Bridge.focusWindow(true);
-        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
-      } else if (wasChat) {
+        window.setTimeout(() => this.views.get(view)?.focus?.(), 120);
+      } else if (wasText) {
         void Bridge.focusWindow(false);
       }
     }

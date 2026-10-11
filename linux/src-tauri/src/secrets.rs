@@ -23,6 +23,9 @@ pub const KNOWN_KEYS: &[&str] = &[
     "resend-api-key",
     "notion-api-key",
     "calcom-api-key",
+    // The SMTP password for the island's "send by email". Host and addresses are
+    // plain settings; only the password is a secret.
+    "smtp-password",
 ];
 
 /// Secret-service key holding the API key for a chat provider.

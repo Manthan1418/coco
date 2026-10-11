@@ -101,6 +101,8 @@ export const Bridge = {
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
+  /** Sends the mail view's message over SMTP. The password never leaves Rust. */
+  mailSend: (request: MailRequest) => callOrThrow<void>("mail_send", { request }),
   /** Only ever tells you whether a key exists — never its value. */
   secretPresent: (key: string) => call<boolean>("secret_present", { key }),
   secretSet: (key: string, value: string) => callOrThrow<void>("secret_set", { key, value }),
@@ -130,6 +132,15 @@ export interface DroppedFile {
   name: string;
   path: string;
   size: number;
+}
+
+/** One outgoing mail. `filePath` attaches a dropped file; the rest is the form. */
+export interface MailRequest {
+  to: string;
+  subject: string;
+  body: string;
+  filePath?: string | null;
+  fileName?: string | null;
 }
 
 export interface HookStatus {

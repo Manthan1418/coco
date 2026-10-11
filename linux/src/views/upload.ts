@@ -1,8 +1,5 @@
 // Drop zone, upload progress and the "what do you want to do with it" card —
 // ports of UploadView / UploadingView / ChooseView from IslandViewContent.swift.
-//
-// Sending a file by email is not in the Windows v1, so `choose` offers the one
-// action the spec asks for: ask a question about it.
 
 import { h, clear } from "./dom";
 import { State } from "../core/state";
@@ -93,6 +90,11 @@ export function buildChoose(actions: ViewActions): ViewHost {
       class: "btn primary",
       text: "Ask a question",
       onclick: () => actions.setView("prompt"),
+    }),
+    h("button", {
+      class: "btn secondary",
+      text: "Send by email",
+      onclick: () => actions.setView("mail"),
     }),
     h("button", {
       class: "btn secondary",

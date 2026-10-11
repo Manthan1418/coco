@@ -7,6 +7,7 @@ mod hooks;
 mod integrations;
 mod island;
 pub mod log;
+mod mail;
 mod mcp_call;
 mod pipe;
 mod secrets;
@@ -448,6 +449,7 @@ pub fn run() {
             brain::chat_rename,
             brain::chat_delete,
             ingest_file,
+            mail::mail_send,
             secret_present,
             secret_set,
             secret_clear,

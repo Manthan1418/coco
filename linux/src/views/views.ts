@@ -10,6 +10,7 @@ import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
+import { buildMail } from "./mail";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 
 export interface ViewActions {
@@ -501,8 +502,8 @@ export function buildViews(
   map.set("upload", buildUpload());
   map.set("uploading", buildUploading());
   map.set("choose", buildChoose(actions));
-  // Not in the Windows v1: sending a file by email, window attach + web result.
-  map.set("mail", buildPlaceholder("Sending by email isn't in this version.", ""));
+  map.set("mail", buildMail(actions));
+  // Not in the Windows v1: window attach + web result.
   map.set("searching", buildPlaceholder("Claude is searching…", ""));
   map.set("result", buildPlaceholder("Result", ""));
   return map;

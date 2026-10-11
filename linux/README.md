@@ -25,6 +25,7 @@ brain. Tauri 2 + Rust + TypeScript, no framework, no telemetry, no account.
 | **Chat** | Streaming replies from a **local omniroute gateway** (OpenAI-compatible, `http://localhost:20128/v1`), with history on disk, rename/delete, cancel mid-reply. |
 | **Hands** | A local tool loop over `coco-mcp`: run commands, find and open files, launch apps, notify, play music, search the web, save and recall memory. |
 | **Approvals** | Destructive commands arrive as an approval card first. Read-only commands (list, show, find) run straight away; `sudo` goes through `pkexec`. |
+| **Email** | Drop a file and pick **Send by email** — Coco sends it over your own SMTP server, with a To / Subject / optional line form. The macOS build handed this to Mail.app; here Coco speaks SMTP itself. |
 | **Voice** *(optional)* | "hey coco" opens the island and it greets you back — local whisper wake word + Piper TTS. |
 
 Everything happens on your machine: keys live in the Secret Service
@@ -98,7 +99,7 @@ and restart — the app self-installs both into `~/.local/share/coco/bin/` on bo
 
 | Path | What |
 |---|---|
-| `~/.config/coco/settings.json` | settings: provider, model, endpoint, hotkey, screen, autostart |
+| `~/.config/coco/settings.json` | settings: provider, model, endpoint, hotkey, screen, autostart, SMTP server + addresses |
 | `~/.local/share/coco/chats/` | one JSON file per conversation |
 | `~/.local/share/coco/memory/` | the assistant's memory, written by its memory tools |
 | `~/.local/share/coco/bin/` | `coco-hook`, `coco-mcp` — installed on first boot |
