@@ -82,11 +82,17 @@ For day-to-day development:
 npm run tauri dev     # vite dev server, debug build, live reload
 ```
 
-Plain `cargo build` is **not** enough — it bakes the dev URL into the binary.
-Installable binaries come from `tauri build` (or, for a quick local install,
-copy `target/release/coco` **and** `target/release/coco-mcp` into
-`~/.local/bin/` and restart — the app self-installs both into
-`~/.local/share/coco/bin/` on boot).
+Plain `cargo build` is **not** enough — without Tauri's `custom-protocol`
+feature it bakes the dev URL (`http://localhost:1420`) into the binary, so the
+island stays blank unless the Vite server happens to be running. The app now
+says which document it loaded at boot: `island loaded tauri://localhost` is a
+good production build, `WARNING island loaded http://localhost:1420` means it
+was built wrong.
+
+Installable binaries come from `tauri build` / `npm run pack`; for a quick local
+build pass `--features custom-protocol` (a `[features]` entry now forwards it),
+copy `target/release/coco` **and** `target/release/coco-mcp` into `~/.local/bin/`
+and restart — the app self-installs both into `~/.local/share/coco/bin/` on boot.
 
 ## Where things live
 
