@@ -262,6 +262,9 @@ fn normalize_endpoint(endpoint: &str) -> Result<String, String> {
     }
     if trimmed.ends_with("chat/completions") {
         Ok(trimmed.to_string())
+    } else if trimmed.ends_with("/v1") {
+        // A base URL that already carries its version — don't double the /v1.
+        Ok(format!("{trimmed}/chat/completions"))
     } else {
         Ok(format!("{trimmed}/v1/chat/completions"))
     }
@@ -937,6 +940,15 @@ mod tests {
         assert_eq!(
             normalize_endpoint("http://localhost:8000").unwrap(),
             "http://localhost:8000/v1/chat/completions"
+        );
+        // A base that already ends in /v1 must not gain a second one.
+        assert_eq!(
+            normalize_endpoint("http://localhost:20128/v1").unwrap(),
+            "http://localhost:20128/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_endpoint("http://localhost:20128/v1/").unwrap(),
+            "http://localhost:20128/v1/chat/completions"
         );
         // Empty or scheme-less input is an error, never a request to nowhere.
         assert!(normalize_endpoint("   ").is_err());
