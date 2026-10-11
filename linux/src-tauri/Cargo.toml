@@ -48,3 +48,7 @@ x11rb = { version = "0.13", features = ["shape"] }
 
 # Reading our own X11 window id out of the Tauri window, for the above.
 raw-window-handle = "0.6"
+
+# The webview widget's own focus: X11 focus alone does not make WebKitGTK treat
+# the document as focused, so the chat's text field could never be typed into.
+gtk = { version = "0.18", features = ["v3_24"] }

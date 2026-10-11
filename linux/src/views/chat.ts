@@ -262,6 +262,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   );
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
+  // The compositor hands the island the keyboard asynchronously, after the view
+  // has already swung open — a single `input.focus()` at open time can land
+  // before the window is actually focused and be thrown away, leaving every
+  // keystroke to go nowhere. Re-take the field whenever the window gains focus
+  // while the chat is the visible view.
+  window.addEventListener("focus", () => {
+    if (el.classList.contains("on") && !input.disabled) input.focus();
+  });
+
   let renderedKey = "";
   // Sending state lives in State.chatSending so the history list can
   // unblock it when a conversation is opened mid-turn.
@@ -409,6 +418,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     focus() {
       input.focus();
       input.select();
+      // Retry while the window picks up the keyboard; the first attempt often
+      // runs before the compositor has handed the island focus.
+      for (const delay of [60, 180, 400]) {
+        window.setTimeout(() => {
+          if (el.classList.contains("on") && !input.disabled && document.activeElement !== input) {
+            input.focus();
+          }
+        }, delay);
+      }
     },
   };
 }

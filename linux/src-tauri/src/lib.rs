@@ -138,6 +138,9 @@ fn focus_window(app: AppHandle, focused: bool) {
     if focused {
         let _ = win.set_focus();
     }
+    // GTK only lets widgets be touched on the main thread.
+    let w = win.clone();
+    let _ = app.run_on_main_thread(move || island::gtk_take_focus(&w, focused));
 }
 
 #[tauri::command]

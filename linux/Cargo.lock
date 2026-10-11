@@ -544,6 +544,7 @@ name = "coco"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "gtk",
  "keyring",
  "raw-window-handle",
  "reqwest 0.12.28",

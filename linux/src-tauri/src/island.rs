@@ -562,8 +562,111 @@ pub fn make_non_activating(win: &WebviewWindow) {
 }
 
 /// Temporarily allow activation so a text field inside the island can be typed in.
+///
+/// `set_focusable` alone is not enough on XWayland. Tauri maps it to GTK's
+/// `set_accept_focus`, which does not rewrite the `WM_HINTS` input flag once the
+/// window is mapped; the island is built non-activating, so that flag stayed `0`
+/// for the life of the process and a compositor that honours the hint would never
+/// hand the island the keyboard — the chat's field could be clicked but never
+/// typed into. Re-assert the hint ourselves and ask the compositor to activate us
+/// (`_NET_ACTIVE_WINDOW`), then push the X input focus onto the window directly,
+/// which is what XWayland actually forwards to the compositor.
 pub fn set_activating(win: &WebviewWindow, activating: bool) {
     let _ = win.set_focusable(activating);
+    let Some(xid) = xid_of(win) else { return };
+    with_x(|conn| {
+        set_input_hint(conn, xid, activating)?;
+        if activating {
+            activate_window(conn, xid);
+        } else {
+            release_window(conn);
+        }
+        conn.flush().ok()?;
+        Some(())
+    });
+}
+
+/// Hand the keyboard back when the chat closes. Focus goes to the pointer
+/// (`PointerRoot`), so the compositor — or the user's next click — gives it to
+/// whatever window they are actually looking at instead of the island keeping it.
+fn release_window(conn: &x11rb::rust_connection::RustConnection) {
+    let _ = conn.set_input_focus(
+        x11rb::protocol::xproto::InputFocus::POINTER_ROOT,
+        x11rb::protocol::xproto::InputFocus::POINTER_ROOT,
+        0u32,
+    );
+}
+
+/// Re-write the `WM_HINTS` `input` flag, keeping whatever else GTK put there.
+fn set_input_hint(conn: &x11rb::rust_connection::RustConnection, xid: u32, input: bool) -> Option<()> {
+    let hints = intern(conn, "WM_HINTS")?;
+    let reply = conn
+        .get_property(
+            false,
+            xid,
+            hints,
+            x11rb::protocol::xproto::AtomEnum::WM_HINTS,
+            0,
+            32,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    let mut vals: Vec<u32> = reply.value32().map(|v| v.collect()).unwrap_or_default();
+    if vals.len() < 9 {
+        vals.resize(9, 0);
+    }
+    vals[0] |= 1; // InputHint
+    vals[1] = u32::from(input);
+    conn.change_property32(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        xid,
+        hints,
+        x11rb::protocol::xproto::AtomEnum::WM_HINTS,
+        &vals,
+    )
+    .ok()?;
+    Some(())
+}
+
+/// EWMH "focus me": the client message the compositor listens for, plus the
+/// X-level focus change and a raise. GTK's `present_with_time` alone was not
+/// enough to make the island active on this machine.
+fn activate_window(conn: &x11rb::rust_connection::RustConnection, xid: u32) {
+    let Some(root) = conn.setup().roots.first().map(|r| r.root) else { return };
+    if let Some(active) = intern(conn, "_NET_ACTIVE_WINDOW") {
+        let event = x11rb::protocol::xproto::ClientMessageEvent::new(32, xid, active, [1u32, 0, 0, 0, 0]);
+        let mask = x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_REDIRECT
+            | x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = conn.send_event(false, root, mask, event);
+    }
+    let _ = conn.set_input_focus(x11rb::protocol::xproto::InputFocus::PARENT, xid, 0u32);
+    let _ = conn.configure_window(
+        xid,
+        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+            .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
+    );
+}
+
+/// GTK-side focus. X focus is not enough for WebKitGTK: the toplevel can be the
+/// X input focus while no widget inside it holds the GTK focus, and then the
+/// webview never receives a key press (`document.hasFocus()` stays false and
+/// keystrokes go nowhere). Push the focus down to the first focusable widget —
+/// the webview — and present the window so GTK considers it active. Must run on
+/// the main thread.
+pub fn gtk_take_focus(win: &WebviewWindow, focused: bool) {
+    use gtk::prelude::*;
+    let Ok(window) = win.gtk_window() else { return };
+    if focused {
+        // Present first so GTK treats the toplevel as the one in front, then
+        // push focus down to the first focusable widget — the webview.
+        window.present();
+        window.child_focus(gtk::DirectionType::Down);
+    } else {
+        // Drop the widget focus so the webview stops swallowing keystrokes once
+        // the chat is closed.
+        window.set_focus(Option::<&gtk::Widget>::None);
+    }
 }
 
 /// Position, size and scale of the monitor the island lives on. Any change here
