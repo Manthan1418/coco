@@ -10,6 +10,14 @@ license.workspace = true
 name = "coco_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Production builds enable this so Tauri serves the embedded assets instead of
+# the Vite dev server. The Tauri CLI (`tauri build` / `npm run pack`) turns it on
+# automatically; a *bare* `cargo build --release` does not, which silently
+# yields a dev binary that loads http://localhost:1420 and shows a blank island
+# unless Vite is running. If you build by hand, pass `--features custom-protocol`.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

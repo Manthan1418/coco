@@ -463,6 +463,30 @@ pub fn run() {
                 island::make_non_activating(&win);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
+                // Which document did the webview actually get? A release binary
+                // built without the `custom-protocol` feature (a bare
+                // `cargo build --release`) is silently treated as a dev build and
+                // loads `devUrl` — the Vite server — instead of the embedded
+                // assets. The island is then blank unless `npm run dev` happens
+                // to be running, and every hook goes unacknowledged. That failure
+                // mode is far too quiet, so name it here.
+                if let Ok(url) = win.url() {
+                    let dev = app
+                        .config()
+                        .build
+                        .dev_url
+                        .as_ref()
+                        .is_some_and(|d| url.as_str().starts_with(d.as_str()));
+                    if dev {
+                        log::line(format!(
+                            "WARNING island loaded {url} (Vite dev server). This binary has no \
+                             embedded frontend — build with `tauri build`/`npm run pack` \
+                             (or pass --features custom-protocol), not a bare cargo build."
+                        ));
+                    } else {
+                        log::line(format!("island loaded {url}"));
+                    }
+                }
                 // The settings window already refuses to close; the island must
                 // too, and until now it did not. A close request from the
                 // compositor (a Super+Q over a focused island, a window rule,
