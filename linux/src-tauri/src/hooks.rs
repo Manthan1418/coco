@@ -319,12 +319,14 @@ pub fn ensure_hook_exe(app: &AppHandle) {
         return;
     }
 
-    // `dest` is first: when Coco is already installed the hook is *already* in
-    // its final place, and none of the source candidates below apply — the app
-    // sits in ~/.local/bin with no `release/` or `target/` beside it. Checking
-    // the destination first turns that case from a permanent false "not found"
-    // into a no-op.
-    let mut candidates: Vec<PathBuf> = vec![dest.clone()];
+    // Preference order: the resource bundled with the app, a binary sitting
+    // beside the running executable, and only then `dest` itself. `dest` stays
+    // in the list — an installed app with no source beside it must be a quiet
+    // no-op rather than a false "not found" — but it goes *last*, so a real,
+    // newer source is not shadowed. With `dest` first (as it was), `src` always
+    // resolved to `dest` and a rebuild or reinstall never refreshed a stale
+    // `~/.local/share/coco/bin`.
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(p) = app.path().resolve("coco-hook", tauri::path::BaseDirectory::Resource) {
         candidates.push(p);
     }
@@ -337,6 +339,7 @@ pub fn ensure_hook_exe(app: &AppHandle) {
             candidates.push(parent.join("../target/release/coco-hook"));
         }
     }
+    candidates.push(dest.clone());
 
     let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
     let Some(src) = candidates.into_iter().find(|p| p.exists()) else {

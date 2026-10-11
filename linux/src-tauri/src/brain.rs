@@ -932,11 +932,14 @@ pub fn ensure_mcp(app: &tauri::AppHandle) {
     if let Some(dir) = dest.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let mut candidates: Vec<PathBuf> = vec![dest.clone()];
-    // The bundle's own resource dir: `dest` holds an installed copy, but a
-    // fresh install of a deb/appimage has one to copy *from*, and without
-    // this candidate a packaged Coco would log "coco-mcp not found" forever
-    // and chat without any hands at all.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // The bundle's own resource dir first: `dest` holds an installed copy, but a
+    // fresh install of a deb/appimage has one to copy *from*, and without this
+    // candidate a packaged Coco would log "coco-mcp not found" forever and chat
+    // without any hands at all. Then a binary beside the running executable (a
+    // dev or release build). `dest` is last so it never shadows a real source —
+    // with it first, `src` always resolved to `dest` and the refresh below never
+    // fired.
     if let Ok(p) = app.path().resolve("coco-mcp", tauri::path::BaseDirectory::Resource) {
         candidates.push(p);
     }
@@ -947,6 +950,7 @@ pub fn ensure_mcp(app: &tauri::AppHandle) {
             candidates.push(parent.join("../target/release/coco-mcp"));
         }
     }
+    candidates.push(dest.clone());
     // A just-built binary is newer than an installed one; same-source
     // rebuilds are often byte-identical, so size alone cannot decide.
     let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
